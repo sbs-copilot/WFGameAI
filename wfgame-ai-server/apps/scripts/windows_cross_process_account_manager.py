@@ -249,7 +249,9 @@ class WindowsCrossProcessAccountManager:
             return None
         except Exception as e:
             print(f"❌ 数据库分配失败，回退到文件模式: {e}")
-            return self._allocate_account_file(device_serial)    def _allocate_account_file(self, device_serial: str) -> Optional[Dict]:
+            return self._allocate_account_file(device_serial)    
+    
+    def _allocate_account_file(self, device_serial: str) -> Optional[Dict]:
         """文件模式分配账号（原有逻辑）"""
         lock_fd = self._acquire_lock()
         if lock_fd is None:

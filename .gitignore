@@ -22,6 +22,7 @@ docs/
 *.csv
 *.xlsx
 
+
 run/*
 media/
 # 不忽略前端目录和Django静态文件目录下的图片资源
@@ -81,3 +82,4 @@ config_*.ini
 /wfgame-ai-web/node_modules/
 /.vscode/
 run/celery_dev.pid
+ai_debug/

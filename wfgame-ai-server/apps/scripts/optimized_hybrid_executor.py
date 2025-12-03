@@ -61,6 +61,11 @@ def _device_worker_with_account(device_serial: str, scripts: List[dict],
         if current_dir not in sys.path:
             sys.path.insert(0, current_dir)
 
+        # 添加项目根目录到 Python 路径（关键：解决 utils 包导入问题）
+        project_root = os.path.dirname(os.path.dirname(current_dir))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+
         # 导入设备相关模块
         from adbutils import adb
 

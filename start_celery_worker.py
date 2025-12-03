@@ -4,7 +4,7 @@
 
 用法示例：
     # 开发环境（使用 config_dev.ini，对应队列 ai_queue，可选自动重载）
-    python start_celery_worker.py --env dev
+    python start_celery_worker.py --env dev --autoreload
     
     # 线上环境（使用 config.ini，对应队列 ai_queue_prod，默认禁用自动重载）
     python start_celery_worker.py --env prod

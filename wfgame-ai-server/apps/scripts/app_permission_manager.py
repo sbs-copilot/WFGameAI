@@ -32,20 +32,6 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# 导入通用UI检测器
-try:
-    # 添加项目根目录到路径以导入universal_ui_detector
-    current_file = os.path.abspath(__file__)
-    project_root = os.path.abspath(os.path.join(current_file, "..", "..", "..", ".."))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-
-    from universal_ui_dom_detector import UniversalUIDetector
-    UNIVERSAL_UI_DETECTOR_AVAILABLE = True
-    logger.info("✅ UniversalUIDetector 导入成功")
-except ImportError as e:
-    logger.warning(f"⚠️ UniversalUIDetector 未找到: {e}，使用基础UI检测")
-    UNIVERSAL_UI_DETECTOR_AVAILABLE = False
 
 class PermissionAction(Enum):
     """权限弹窗可能的操作"""

@@ -50,6 +50,10 @@ GLOBAL_REPLAY_TOTAL_STEPS: Optional[int] = None
 GLOBAL_REPLAY_SINGLE_DEVICE_STEPS: Optional[int] = None
 GLOBAL_INITIAL_DEVICE_COUNT: Optional[int] = None
 
+# 全局OCR Pipeline单例(避免每次OCR都重新创建)
+_OCR_PIPELINE = None
+_OCR_PIPELINE_LOCK = None
+
 
 def _get_socket_client():
     global _SOCKET_CLIENT
@@ -66,6 +70,37 @@ def _get_socket_client():
         print(msg)
         ERROR_LOGS.append(msg)
         return None
+
+
+def _get_ocr_pipeline():
+    """获取全局OCR Pipeline单例,线程安全的懒加载"""
+    global _OCR_PIPELINE, _OCR_PIPELINE_LOCK
+    
+    if _OCR_PIPELINE is not None:
+        return _OCR_PIPELINE
+    
+    # 初始化线程锁
+    if _OCR_PIPELINE_LOCK is None:
+        import threading
+        _OCR_PIPELINE_LOCK = threading.Lock()
+    
+    # 双重检查锁定模式
+    with _OCR_PIPELINE_LOCK:
+        if _OCR_PIPELINE is not None:
+            return _OCR_PIPELINE
+        
+        try:
+            from paddlex import create_pipeline
+            print_realtime("🔧 初始化全局OCR Pipeline...")
+            # 使用最简单的配置,预处理参数在predict时传入
+            _OCR_PIPELINE = create_pipeline(pipeline="OCR")
+            print_realtime("✅ 全局OCR Pipeline初始化完成")
+            return _OCR_PIPELINE
+        except Exception as e:
+            msg = f"❌ OCR Pipeline初始化失败: {e}"
+            print_realtime(msg)
+            ERROR_LOGS.append(msg)
+            return None
 
 # 轻量文件日志包装，避免未定义错误
 # 移除文件日志相关类（用户不需要），保留占位注释避免未来误添加
@@ -291,23 +326,45 @@ class StepTracker:
         """简化后的进度统计：
         - total_all: 强制使用预计算的固定总步数 (total_steps)
         - completed_all: 聚合所有设备已完成(成功/失败)的步骤数
+        - success_all: 聚合所有设备成功的步骤数
+        - failed_all: 聚合所有设备失败的步骤数
         """
         devices_found = {str(self.device_serial)}
         completed_all = 0
+        success_all = 0
+        failed_all = 0
 
         # 优先使用 Redis 原子计数（更可靠，避免跨进程重复统计或遗漏）
         if self.redis_client and self.task_id:
             try:
                 completed_key = f"wfgame:replay:task:{self.task_id}:completed_total"
+                success_key = f"wfgame:replay:task:{self.task_id}:success_total"
+                failed_key = f"wfgame:replay:task:{self.task_id}:failed_total"
+                
                 val = self.redis_client.get(completed_key)
                 if val:
                     try:
                         completed_all = int(val)
-                        total_source = "redis_counter"
                     except Exception:
                         completed_all = 0
-                else:
-                    # 回退到按设备计数（在某些版本中仍保留历史数据）
+                
+                # 读取成功和失败计数
+                val_success = self.redis_client.get(success_key)
+                if val_success:
+                    try:
+                        success_all = int(val_success)
+                    except Exception:
+                        success_all = 0
+                
+                val_failed = self.redis_client.get(failed_key)
+                if val_failed:
+                    try:
+                        failed_all = int(val_failed)
+                    except Exception:
+                        failed_all = 0
+                
+                # 如果没有原子计数，回退到按设备计数
+                if completed_all == 0:
                     pattern = f"wfgame:replay:task:{self.task_id}:device:*:steps"
                     for key in self.redis_client.scan_iter(match=pattern):
                         try:
@@ -323,13 +380,19 @@ class StepTracker:
                             for rec in records or []:
                                 for s in rec.get('steps', []) or []:
                                     st = (s.get('result') or {}).get('status')
-                                    if st in ("success", "failed"):
+                                    if st == "success":
                                         completed_all += 1
+                                        success_all += 1
+                                    elif st == "failed":
+                                        completed_all += 1
+                                        failed_all += 1
                         except Exception:
                             continue
             except Exception:
                 # Redis 失败时回退到仅计算本地
                 completed_all = 0
+                success_all = 0
+                failed_all = 0
 
         # 如果 Redis 没有数据或不可用，则回退到本地计算（至少包含当前设备）
         if completed_all == 0:
@@ -337,8 +400,12 @@ class StepTracker:
                 for rec in self.records:
                     for s in rec.get('steps', []) or []:
                         st = (s.get('result') or {}).get('status')
-                        if st in ("success", "failed"):
+                        if st == "success":
                             completed_all += 1
+                            success_all += 1
+                        elif st == "failed":
+                            completed_all += 1
+                            failed_all += 1
             except Exception:
                 pass
 
@@ -366,7 +433,7 @@ class StepTracker:
              if single and single > 0 and dev_cnt:
                  total_all = single * dev_cnt
 
-        # 如果仍然无法获取有效总步数（极少情况），回退到本地记录的步数（仅作为最后兜底）
+        # 如果仍然无法获取有效总步数（极少情况），回退到本地记录的步数乘以设备数（避免多设备场景下分母错误）
         if not total_all or total_all <= 0:
              local_total = 0
              try:
@@ -375,11 +442,14 @@ class StepTracker:
                         local_total += 1
              except Exception:
                  pass
-             total_all = local_total
+             # 多设备场景下需要乘以设备数,避免显示"6/6"而非"6/210"
+             device_count = max(1, GLOBAL_INITIAL_DEVICE_COUNT or 1)
+             total_all = local_total * device_count
+             print_realtime(f"⚠️ 使用本地回退计算总步数: {local_total} * {device_count} = {total_all}")
 
         percent = int(round((completed_all / total_all) * 100)) if total_all and total_all > 0 else 0
         self._progress_devices = sorted(devices_found)
-        return completed_all, total_all, percent
+        return completed_all, total_all, percent, success_all, failed_all
 
     def _get_or_create_report_detail(self):
         """获取或创建与当前任务和设备关联的 ReportDetail 实例"""
@@ -468,12 +538,16 @@ class StepTracker:
             # 删除设备级快照
             key = self._redis_key()
             self.redis_client.delete(key)
-            # 删除聚合计数（总完成步数）和设备完成计数
+            # 删除聚合计数（总完成步数、成功失败计数）和设备完成计数
             try:
                 completed_key = f"wfgame:replay:task:{self.task_id}:completed_total"
                 device_completed_key = f"wfgame:replay:task:{self.task_id}:device:{self.device_serial}:completed"
+                success_key = f"wfgame:replay:task:{self.task_id}:success_total"
+                failed_key = f"wfgame:replay:task:{self.task_id}:failed_total"
                 self.redis_client.delete(completed_key)
                 self.redis_client.delete(device_completed_key)
+                self.redis_client.delete(success_key)
+                self.redis_client.delete(failed_key)
             except Exception:
                 pass
             print_realtime(f"🧹 已清理 Redis Keys: {key} (+ counters)")
@@ -543,7 +617,7 @@ class StepTracker:
                 self._primary_warned = True
         return is_primary
 
-    def _push_progress_event(self, *, script_id: int, completed_steps: int = None, total_steps: int = None):
+    def _push_progress_event(self, *, script_id: int, completed_steps: int = None, total_steps: int = None, success_steps: int = None, failed_steps: int = None):
         """向 socket 房间推送进度事件（后端计算进度避免前端计算异常）"""
         try:
             # 确保主设备已初始化
@@ -562,8 +636,18 @@ class StepTracker:
             rec = self.records[-1]
             steps = rec.get("steps", [])
             step_count = len(steps)
-            if completed_steps is None:
-                completed_steps = sum(1 for s in steps if (s.get('result') or {}).get('status') in ("success","failed"))
+            
+            # 如果未提供统计数据,从当前记录计算
+            if completed_steps is None or success_steps is None or failed_steps is None:
+                local_success = sum(1 for s in steps if (s.get('result') or {}).get('status') == "success")
+                local_failed = sum(1 for s in steps if (s.get('result') or {}).get('status') == "failed")
+                if completed_steps is None:
+                    completed_steps = local_success + local_failed
+                if success_steps is None:
+                    success_steps = local_success
+                if failed_steps is None:
+                    failed_steps = local_failed
+            
             calculated_total_steps = self._cached_total_steps or (step_count * max(1, GLOBAL_INITIAL_DEVICE_COUNT or 1))
             progress_percentage = round((completed_steps / calculated_total_steps) * 100, 2) if calculated_total_steps > 0 else 0
             payload = {
@@ -571,14 +655,17 @@ class StepTracker:
                 "progress": progress_percentage,
                 "completed_steps": completed_steps,
                 "total_steps": calculated_total_steps,
+                "success_steps": success_steps,
+                "failed_steps": failed_steps,
                 "online_devices": GLOBAL_INITIAL_DEVICE_COUNT or 1,
                 "step_count": step_count,
             }
 
             # 推送进度事件
             try:
-                client.emit(room=room, module='task', event='progress', data=payload)
-                print_realtime(f"📊 [Task-{self.task_id} Dev-{self.device_serial}] 推送进度: {progress_percentage}% ({completed_steps}/{calculated_total_steps}) 设备数:{GLOBAL_INITIAL_DEVICE_COUNT or 1}")
+                result = client.emit(room=room, module='task', event='progress', data=payload)
+                print_realtime(f"📊 [Task-{self.task_id} Dev-{self.device_serial}] 推送进度: {progress_percentage}% ({completed_steps}/{calculated_total_steps}) 成功:{success_steps} 失败:{failed_steps}")
+                print_realtime(f"🔍 Socket emit结果: {result}")
             except Exception as _emit_progress_err:
                 track_error(f"⚠️ 进度事件推送失败: {_emit_progress_err}")
         except Exception as e:
@@ -610,7 +697,7 @@ class StepTracker:
             display_status = display
             _nested_status = nested_status
 
-            completed_global, total_global, percent_global = self._compute_task_progress()
+            completed_global, total_global, percent_global, success_global, failed_global = self._compute_task_progress()
             if getattr(self, '_cached_total_steps', None) and self._cached_total_steps:
                 total_global = int(self._cached_total_steps)
                 percent_global = int(round((completed_global / total_global) * 100)) if total_global > 0 else percent_global
@@ -629,13 +716,15 @@ class StepTracker:
                         _nested_status = _nested_status or res.get("status")
                 except Exception:
                     pass
-            # 最小化负载：仅保留脚本ID、步骤索引、状态、显示状态、开始/结束时间
+            # 最小化负载：仅保留脚本ID、步骤索引、状态、显示状态、开始/结束时间、成功失败统计
             payload = {
                 "script": int(script_id) if script_id is not None else None,
                 "step_index": int(step_index),
                 "total_steps": total_global,
                 "progress": percent_global,
                 "completed_steps": completed_global,
+                "success_steps": success_global,
+                "failed_steps": failed_global,
                 "status": status,
                 "start_time": result_start,
                 "end_time": result_end,
@@ -645,7 +734,8 @@ class StepTracker:
             # 不再附带 Redis 调试字段，保持精简
             # 使用统一 emit，事件名采用最新标准：step
             try:
-                client.emit(room=room, module='task', event='step', data=payload)
+                result = client.emit(room=room, module='task', event='step', data=payload)
+                print_realtime(f"🔍 Socket step emit结果: {result}")
             except Exception as _emit_step_err:
                 track_error(f"⚠️ 单步事件推送失败: {_emit_step_err}")
         except Exception as e:
@@ -885,17 +975,30 @@ class StepTracker:
         else:
             rec["summary"]["failed"] = rec["summary"].get("failed", 0) + 1
 
-        # 原子更新 Redis 进度
+        # 原子更新 Redis 进度和成功/失败计数
         try:
             if self.redis_client and self.task_id:
                 completed_key = f"wfgame:replay:task:{self.task_id}:completed_total"
                 device_completed_key = f"wfgame:replay:task:{self.task_id}:device:{self.device_serial}:completed"
+                success_key = f"wfgame:replay:task:{self.task_id}:success_total"
+                failed_key = f"wfgame:replay:task:{self.task_id}:failed_total"
+                
                 new_total = self.redis_client.incr(completed_key, amount=1)
                 new_dev_total = self.redis_client.incr(device_completed_key, amount=1)
+                
+                # 根据成功/失败状态更新对应计数器
+                if success:
+                    new_success = self.redis_client.incr(success_key, amount=1)
+                    self.redis_client.expire(success_key, 7*24*3600)
+                    print_realtime(f"📈 [Task-{self.task_id} Dev-{self.device_serial}] Redis进度更新: Total={new_total}, DevTotal={new_dev_total}, Success={new_success}")
+                else:
+                    new_failed = self.redis_client.incr(failed_key, amount=1)
+                    self.redis_client.expire(failed_key, 7*24*3600)
+                    print_realtime(f"📈 [Task-{self.task_id} Dev-{self.device_serial}] Redis进度更新: Total={new_total}, DevTotal={new_dev_total}, Failed={new_failed}")
+                
                 # 延长过期时间
                 self.redis_client.expire(completed_key, 7*24*3600)
                 self.redis_client.expire(device_completed_key, 7*24*3600)
-                print_realtime(f"📈 [Task-{self.task_id} Dev-{self.device_serial}] Redis进度更新: Total={new_total}, DevTotal={new_dev_total}")
         except Exception as e:
             track_error(f"⚠️ Redis进度更新失败: {e}")
 
@@ -985,16 +1088,20 @@ class StepTracker:
         _ = datetime.now(timezone.utc)
         self._flush_to_redis()
 
-        # 脚本结束后，检查是否所有脚本步骤都已完成，若是则推送完成状态
+        # 脚本结束后，推送实际进度（使用真实的已完成步数，而非强制100%）
         try:
             client = _get_socket_client()
             if client and self._is_primary_device():
-                print_realtime(f"🏁 [Task-{self.task_id} Dev-{self.device_serial}] 脚本结束，强制推送最终进度: {self._cached_total_steps}/{self._cached_total_steps}")
-                # 强制推送最终进度 (100%)
+                # 计算实际的已完成步数和成功失败统计
+                completed_actual, total_actual, percent_actual, success_actual, failed_actual = self._compute_task_progress()
+                print_realtime(f"🏁 [Task-{self.task_id} Dev-{self.device_serial}] 脚本结束，推送实际进度: {completed_actual}/{total_actual} ({percent_actual}%) 成功:{success_actual} 失败:{failed_actual}")
+                # 推送实际进度（不强制100%，使用真实数据）
                 self._push_progress_event(
                     script_id=rec.get("meta", {}).get("id"),
-                    completed_steps=self._cached_total_steps,
-                    total_steps=self._cached_total_steps
+                    completed_steps=completed_actual,
+                    total_steps=total_actual,
+                    success_steps=success_actual,
+                    failed_steps=failed_actual
                 )
         except Exception as _pe:
             track_error(f"⚠️ 任务完成状态推送异常: {_pe}")
@@ -1298,8 +1405,19 @@ def load_script_content(script_cfg):
         path = script_cfg['path']
         with open(path, 'r', encoding='utf-8') as f:
             json_data = json.load(f)
-        steps = json_data.get('steps', [])
-        meta = json_data.get('meta', {})
+        
+        # 兼容两种格式：数组格式和对象格式
+        if isinstance(json_data, list):
+            # 数组格式：直接是步骤列表，需要处理 defaults
+            steps = apply_defaults_to_steps(json_data)
+            meta = {}
+        else:
+            # 对象格式：包含 steps 和 meta
+            steps = json_data.get('steps', [])
+            meta = json_data.get('meta', {})
+            # 对象格式中的 steps 也可能包含 defaults，需要处理
+            steps = apply_defaults_to_steps(steps)
+        
         return steps, meta, os.path.basename(path)
 
     # 2) 数据库ID模式
@@ -1312,6 +1430,10 @@ def load_script_content(script_cfg):
             raise FileNotFoundError(f"脚本ID不存在: {script_cfg['script_id']}")
         steps = (s.steps or [])
         meta = (s.meta or {})
+        
+        # 处理 defaults 步骤：识别并移除，避免被当作普通步骤执行
+        steps = apply_defaults_to_steps(steps)
+        
         # 补充脚本ID到 meta，便于 StepTracker 直接使用
         try:
             if 'id' not in meta or meta.get('id') is None:
@@ -1454,6 +1576,12 @@ except ImportError:
 def load_yolo_model_for_detection():
     """只从config.ini的[paths]段读取model_path加载YOLO模型，未找到直接抛异常。禁止使用绝对路径。"""
     global model
+    
+    # 单例检查: 如果模型已加载,直接返回
+    if model is not None:
+        print_realtime("✅ YOLO模型已加载,复用现有实例")
+        return True
+    
     if YOLO is None:
         print_realtime("❌ 无法加载YOLO模型：ultralytics未正确导入")
         raise RuntimeError("YOLO未正确导入")
@@ -1503,20 +1631,357 @@ def load_yolo_model_for_detection():
         model = None
         raise
 
-def detect_buttons(frame, target_class=None, conf_threshold=None):
+def perform_ocr_on_region(frame, box_coords, ocr_keywords=None, ocr_min_score=0.5):
     """
-    检测按钮，使用YOLO模型进行推理。
+    对YOLO检测到的区域执行OCR识别,并根据关键字过滤结果
+    
+    参数:
+        frame: 输入的原始图像（numpy数组）
+        box_coords: 检测框坐标 [x1, y1, x2, y2]
+        ocr_keywords: OCR关键字列表（逗号分隔的字符串）
+        ocr_min_score: OCR识别置信度阈值
+    
+    返回:
+        (success, ocr_result_dict) - ocr_result_dict包含texts, scores, has_match等信息
+    """
+    try:
+        # 提取检测区域
+        x1, y1, x2, y2 = [int(c) for c in box_coords]
+        # 确保坐标在图像范围内
+        h, w = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        
+        if x2 <= x1 or y2 <= y1:
+            print_realtime(f"⚠️ OCR区域无效: [{x1},{y1},{x2},{y2}]")
+            return False, {"texts": [], "scores": [], "has_match": False}
+        
+        # 裁剪检测区域
+        roi = frame[y1:y2, x1:x2]
+        roi_h, roi_w = roi.shape[:2]
+        print_realtime(f"🔍 OCR裁剪区域尺寸: {roi_w}x{roi_h} (坐标:[{x1},{y1},{x2},{y2}])")
+        
+        # 检查裁剪区域是否有效
+        if roi_h < 10 or roi_w < 10:
+            print_realtime(f"⚠️ OCR区域太小,跳过识别")
+            return False, {"texts": [], "scores": [], "has_match": False}
+        
+        # 导入关键字过滤器
+        from apps.ocr.services.keyword_filter import KeywordFilter
+        
+        # 获取全局OCR Pipeline(只初始化一次)
+        pipeline = _get_ocr_pipeline()
+        if pipeline is None:
+            print_realtime(f"❌ OCR Pipeline未初始化")
+            return False, {"texts": [], "scores": [], "has_match": False}
+        
+        # 直接对内存中的图像进行OCR识别
+        print_realtime(f"🔍 开始OCR识别(内存模式,使用全局Pipeline)...")
+        predictions = list(pipeline.predict(
+            [roi],  # 直接传递numpy数组
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        ))
+        
+        if not predictions:
+            print_realtime(f"📝 OCR未返回预测结果")
+            return False, {"texts": [], "scores": [], "has_match": False}
+        
+        # 提取识别结果
+        result = predictions[0]
+        res_json = getattr(result, "json", {}).get("res", {})
+        
+        texts = res_json.get("rec_texts", [])
+        scores = res_json.get("rec_scores", [])
+        
+        # 过滤空文本和低置信度结果
+        filtered_texts = []
+        filtered_scores = []
+        for i, text in enumerate(texts):
+            if text and text.strip():
+                score = float(scores[i]) if i < len(scores) else 0.0
+                if score >= ocr_min_score:
+                    filtered_texts.append(text.strip())
+                    filtered_scores.append(score)
+        
+        texts = filtered_texts
+        scores = filtered_scores
+        
+        if not texts:
+            print_realtime(f"📝 OCR未识别到有效文本(阈值:{ocr_min_score})")
+            return False, {"texts": [], "scores": [], "has_match": False}
+        
+        print_realtime(f"📝 OCR识别文本: {texts}, 置信度: {[f'{s:.2f}' for s in scores]}")
+        
+        # 如果指定了关键字,进行过滤
+        has_match = True
+        if ocr_keywords:
+            keyword_filter_config = {
+                "enabled": True,
+                "keywords": ocr_keywords,
+                "fuzzy_match": True,
+                "fuzzy_similarity": 0.80,
+                "ignore_case": True,
+                "ignore_spaces": True,
+                "ignore_digits": False,
+                "min_confidence": ocr_min_score
+            }
+            
+            keyword_filter = KeywordFilter(keyword_filter_config)
+            
+            # 构造OCR结果格式用于过滤
+            ocr_results = [{
+                "image_path": "",  # 内存模式不需要文件路径
+                "texts": texts,
+                "scores": scores,
+                "has_match": True  # 初始为True,由过滤器决定最终结果
+            }]
+            
+            filtered_results = keyword_filter.filter_results(ocr_results)
+            has_match = len(filtered_results) > 0
+            
+            if has_match:
+                print_realtime(f"✅ OCR关键字匹配成功: {ocr_keywords}")
+            else:
+                print_realtime(f"❌ OCR关键字未匹配: {ocr_keywords}")
+        
+        return has_match, {
+            "texts": texts,
+            "scores": scores,
+            "has_match": has_match,
+            "max_score": max(scores) if scores else 0.0
+        }
+                
+    except Exception as e:
+        print_realtime(f"❌ OCR识别异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, {"texts": [], "scores": [], "has_match": False}
+
+
+def perform_fullscreen_ocr_detection(frame, ocr_keywords=None, ocr_min_score=0.5):
+    """
+    对整个屏幕进行OCR检测,查找包含指定关键字的文本
+    
+    参数:
+        frame: 输入的原始图像(numpy数组)
+        ocr_keywords: OCR关键字(逗号分隔的字符串)
+        ocr_min_score: OCR识别置信度阈值
+    
+    返回:
+        (success, result_dict) - result_dict包含position, text, score等信息
+    """
+    try:
+        print_realtime(f"🔍 全屏OCR检测 - 关键字: {ocr_keywords}, 最小置信度: {ocr_min_score}")
+        
+        # 获取全局OCR Pipeline
+        pipeline = _get_ocr_pipeline()
+        if pipeline is None:
+            print_realtime(f"❌ OCR Pipeline未初始化")
+            return False, None
+        
+        # 对整个屏幕进行OCR识别
+        print_realtime(f"🔍 开始全屏OCR识别...")
+        predictions = list(pipeline.predict(
+            [frame],
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        ))
+        
+        if not predictions:
+            print_realtime(f"📝 OCR未返回预测结果")
+            return False, None
+        
+        # 提取识别结果
+        result = predictions[0]
+        res_json = getattr(result, "json", {}).get("res", {})
+        
+        texts = res_json.get("rec_texts", [])
+        scores = res_json.get("rec_scores", [])
+        
+        # 调试: 检查OCR返回的所有坐标类型
+        dt_polys = res_json.get("dt_polys", [])
+        rec_polys = res_json.get("rec_polys", [])
+        rec_boxes = res_json.get("rec_boxes", [])
+        
+        print_realtime(f"🔍 调试 - OCR返回的坐标类型: dt_polys={len(dt_polys)}, rec_polys={len(rec_polys)}, rec_boxes={len(rec_boxes)}")
+        
+        # 使用rec_polys(识别阶段坐标)而不是dt_polys(检测阶段坐标),更准确
+        polygons = rec_polys if rec_polys else dt_polys
+        
+        if polygons:
+            print_realtime(f"🔍 调试 - 使用坐标类型: {'rec_polys' if rec_polys else 'dt_polys'}")
+        
+        if not texts:
+            print_realtime(f"📝 全屏OCR未识别到文本")
+            return False, None
+        
+        print_realtime(f"📝 全屏OCR识别到 {len(texts)} 个文本区域")
+        
+        # 调试: 输出所有识别到的文本(只显示前20个)
+        if ocr_keywords:
+            print_realtime(f"🔍 调试 - 搜索关键字: {ocr_keywords}")
+            for i, text in enumerate(texts[:20]):
+                score = float(scores[i]) if i < len(scores) else 0.0
+                polygon = polygons[i] if i < len(polygons) else []
+                if polygon:
+                    x_coords = [p[0] for p in polygon]
+                    y_coords = [p[1] for p in polygon]
+                    center_x = int(sum(x_coords) / len(x_coords))
+                    center_y = int(sum(y_coords) / len(y_coords))
+                    print_realtime(f"  [{i}] '{text}' (置信度:{score:.2f}) 位置:({center_x},{center_y})")
+        
+        # 导入关键字过滤器
+        from apps.ocr.services.keyword_filter import KeywordFilter
+        
+        # 查找匹配关键字的文本
+        for i, text in enumerate(texts):
+            if not text or not text.strip():
+                continue
+            
+            score = float(scores[i]) if i < len(scores) else 0.0
+            
+            # 检查置信度
+            if score < ocr_min_score:
+                continue
+            
+            # 检查关键字匹配
+            if ocr_keywords:
+                # 使用关键字过滤器进行匹配
+                keyword_filter_config = {
+                    "enabled": True,
+                    "keywords": ocr_keywords,
+                    "fuzzy_match": True,
+                    "fuzzy_similarity": 0.80,
+                    "ignore_case": True,
+                    "ignore_spaces": True,
+                    "ignore_digits": False,
+                    "min_confidence": ocr_min_score
+                }
+                
+                keyword_filter = KeywordFilter(keyword_filter_config)
+                
+                # 构造OCR结果格式用于过滤
+                ocr_results = [{
+                    "image_path": "",
+                    "texts": [text.strip()],
+                    "scores": [score],
+                    "has_match": True
+                }]
+                
+                filtered_results = keyword_filter.filter_results(ocr_results)
+                
+                if len(filtered_results) > 0:
+                    # 找到匹配的文本,计算中心坐标
+                    polygon = polygons[i] if i < len(polygons) else []
+                    if polygon:
+                        # 调试: 对比dt_polys和rec_polys
+                        dt_poly = dt_polys[i] if i < len(dt_polys) else None
+                        rec_poly = rec_polys[i] if i < len(rec_polys) else None
+                        
+                        if dt_poly and rec_poly:
+                            print_realtime(f"🔍 调试 - dt_polys[{i}]: {dt_poly}")
+                            print_realtime(f"🔍 调试 - rec_polys[{i}]: {rec_poly}")
+                        
+                        # 调试: 输出polygon原始数据
+                        print_realtime(f"🔍 调试 - 使用的Polygon坐标: {polygon}")
+                        
+                        # 计算多边形边界框
+                        x_coords = [p[0] for p in polygon]
+                        y_coords = [p[1] for p in polygon]
+                        x_min, x_max = min(x_coords), max(x_coords)
+                        y_min, y_max = min(y_coords), max(y_coords)
+                        
+                        print_realtime(f"🔍 调试 - 边界框: x=[{x_min}, {x_max}], y=[{y_min}, {y_max}]")
+                        
+                        # 默认使用边界框中心
+                        x = int((x_min + x_max) / 2)
+                        y = int((y_min + y_max) / 2)
+                        
+                        print_realtime(f"🔍 调试 - 计算中心点: ({x}, {y})")
+                        
+                        # 如果文本包含关键字但不完全匹配,尝试估算关键字位置
+                        text_stripped = text.strip()
+                        keywords_list = [kw.strip() for kw in ocr_keywords.split(',')]
+                        
+                        # 检查是否完全匹配
+                        exact_match = any(text_stripped == kw for kw in keywords_list)
+                        
+                        if not exact_match and len(text_stripped) > 0:
+                            # 文本包含关键字但不完全匹配,尝试定位关键字位置
+                            for keyword in keywords_list:
+                                keyword_pos = text_stripped.find(keyword)
+                                if keyword_pos >= 0:
+                                    # 计算关键字在文本中的相对位置(0.0-1.0)
+                                    text_len = len(text_stripped)
+                                    keyword_len = len(keyword)
+                                    # 关键字中心位置的相对坐标
+                                    relative_pos = (keyword_pos + keyword_len / 2) / text_len
+                                    
+                                    # 调整X坐标到关键字位置
+                                    text_width = x_max - x_min
+                                    x = int(x_min + text_width * relative_pos)
+                                    
+                                    print_realtime(f"📍 关键字 '{keyword}' 在文本 '{text_stripped}' 中的位置: {keyword_pos}/{text_len}, 调整X坐标: {x}")
+                                    break
+                        
+                        print_realtime(f"✅ 全屏OCR找到匹配文本: {text} (置信度: {score:.2f}) 位置: ({x}, {y})")
+                        
+                        return True, {
+                            "position": (x, y),
+                            "text": text.strip(),
+                            "score": score,
+                            "polygon": polygon
+                        }
+            else:
+                # 没有指定关键字,返回第一个高置信度文本
+                polygon = polygons[i] if i < len(polygons) else []
+                if polygon:
+                    x = int(sum(p[0] for p in polygon) / len(polygon))
+                    y = int(sum(p[1] for p in polygon) / len(polygon))
+                    
+                    print_realtime(f"✅ 全屏OCR找到文本: {text} (置信度: {score:.2f}) 位置: ({x}, {y})")
+                    
+                    return True, {
+                        "position": (x, y),
+                        "text": text.strip(),
+                        "score": score,
+                        "polygon": polygon
+                    }
+        
+        print_realtime(f"❌ 全屏OCR未找到匹配关键字的文本: {ocr_keywords}")
+        return False, None
+        
+    except Exception as e:
+        print_realtime(f"❌ 全屏OCR检测异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return False, None
+
+
+def detect_buttons(frame, target_class=None, conf_threshold=None, use_ocr=False, ocr_keywords=None, ocr_min_score=0.5):
+    """
+    检测按钮，使用YOLO模型进行推理,可选OCR文本识别
     坐标逆变换、类别匹配、置信度阈值等均支持灵活配置。
-    - frame: 输入的原始图像（numpy数组）
-    - target_class: 目标类别名（如'button'）
-    - conf_threshold: 置信度阈值（可选，优先级高于配置文件）
-    返回: (success, (x, y, detected_class))
+    
+    参数:
+        - frame: 输入的原始图像（numpy数组）
+        - target_class: 目标类别名（如'button'）
+        - conf_threshold: 置信度阈值（可选，优先级高于配置文件）
+        - use_ocr: 是否启用OCR文本识别
+        - ocr_keywords: OCR关键字（逗号分隔的字符串）
+        - ocr_min_score: OCR识别置信度阈值
+    
+    返回: (success, (x, y, detected_class, ocr_result))
+        其中ocr_result为None（未启用OCR）或包含OCR结果的字典
     """
     global model
 
     if model is None:
         print_realtime("❌ 错误：YOLO模型未加载，无法进行检测")
-        return False, (None, None, None)
+        return False, (None, None, None, None)
 
     try:
         print_realtime(f"🔍 开始检测目标类别: {target_class}")
@@ -1526,6 +1991,7 @@ def detect_buttons(frame, target_class=None, conf_threshold=None):
         # 优先使用传入参数，否则从config读取
         if conf_threshold is None:
             conf_threshold = get_confidence_threshold_from_config()
+            print_realtime(f"🔍 YOLO模型-使用配置文件中的置信度阈值: {conf_threshold}")
 
         # 将frame保存为临时图片，供YOLO模型推理
         with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
@@ -1543,7 +2009,7 @@ def detect_buttons(frame, target_class=None, conf_threshold=None):
                 conf=conf_threshold,   # 置信度阈值，低于该值的目标会被过滤
                 iou=0.6,               # NMS（非极大值抑制）IoU阈值，控制重叠框的合并
                 half=True if device == "cuda" else False,  # 是否使用半精度加速，仅GPU可用
-                max_det=300,           # 最大检测目标数，防止极端场景下过多框
+                max_det=100,           # 最大检测目标数，防止极端场景下过多框
                 verbose=False          # 是否输出详细推理日志
             )
 
@@ -1562,7 +2028,27 @@ def detect_buttons(frame, target_class=None, conf_threshold=None):
             # 获取原始图片的高和宽，用于坐标逆变换
             orig_h, orig_w = frame.shape[:2]
             print_realtime(f"📏 原始图片尺寸: {orig_w}x{orig_h}")
-
+            
+            # 统计所有检测到的目标
+            total_detections = len(results[0].boxes)
+            print_realtime(f"🔍 YOLO检测到 {total_detections} 个目标 (置信度阈值: {conf_threshold})")
+            
+            # 统计目标类别分布
+            class_counts = {}
+            for box in results[0].boxes:
+                cls_id = int(box.cls.item())
+                detected_class = model.names[cls_id] if hasattr(model, 'names') else f"class_{cls_id}"
+                conf = box.conf.item()
+                if detected_class not in class_counts:
+                    class_counts[detected_class] = []
+                class_counts[detected_class].append(conf)
+            
+            # 打印类别统计
+            for cls_name, confs in class_counts.items():
+                max_conf = max(confs)
+                count = len(confs)
+                marker = "✅" if cls_name == target_class else "📦"
+                print_realtime(f"{marker} {cls_name}: {count}个 (最高置信度: {max_conf:.3f})")
 
             # 遍历所有检测到的目标框
             for box in results[0].boxes:
@@ -1584,12 +2070,26 @@ def detect_buttons(frame, target_class=None, conf_threshold=None):
 
                     # 打印检测到目标的日志，包括类别和置信度
                     print_realtime(f"✅ 找到目标类别 {target_class}，中心坐标: ({x:.2f}, {y:.2f})，置信度: {box.conf.item():.3f}")
-                    # 返回检测成功和中心点坐标、类别名
-                    return True, (x, y, detected_class)
+                    
+                    # 如果启用OCR,对检测区域进行文本识别
+                    ocr_result = None
+                    if use_ocr:
+                        print_realtime(f"🔍 开始OCR识别，关键字: {ocr_keywords}")
+                        ocr_success, ocr_result = perform_ocr_on_region(
+                            frame, box_coords, ocr_keywords, ocr_min_score
+                        )
+                        
+                        # 如果指定了关键字但OCR未匹配,继续查找下一个目标
+                        if ocr_keywords and not ocr_success:
+                            print_realtime(f"⏭️ OCR未匹配关键字,继续查找下一个目标")
+                            continue
+                    
+                    # 返回检测成功和中心点坐标、类别名、OCR结果
+                    return True, (x, y, detected_class, ocr_result)
 
             # 如果没有找到目标类别，返回失败
             print_realtime(f"❌ 未找到目标类别: {target_class} ❌")
-            return False, (None, None, None)
+            return False, (None, None, None, None)
 
         finally:
             # 清理临时文件
@@ -1600,7 +2100,9 @@ def detect_buttons(frame, target_class=None, conf_threshold=None):
 
     except Exception as e:
         print_realtime(f"按钮检测失败: {e}")
-        return False, (None, None, None)
+        import traceback
+        traceback.print_exc()
+        return False, (None, None, None, None)
 
 
 def normalize_script_path(path_input):
@@ -2037,6 +2539,55 @@ def process_priority_based_script(device, steps, meta, device_report_dir, action
     return cycle_count > 0
 
 
+def apply_defaults_to_steps(steps):
+    """
+    处理数组格式脚本中的defaults
+    如果第一个步骤是defaults定义,提取defaults并应用到后续步骤
+    """
+    if not isinstance(steps, list) or len(steps) == 0:
+        return steps
+    
+    first_step = steps[0]
+    defaults = {}
+    exclude_keys = []
+    is_defaults_step = False
+    
+    # 检查第一个步骤是否是defaults定义
+    if first_step.get('step_type') == 'defaults':
+        is_defaults_step = True
+        exclude_keys = ['step_type', 'remark']
+    elif first_step.get('is_defaults') == True:
+        is_defaults_step = True
+        exclude_keys = ['is_defaults', 'remark']
+    elif first_step.get('action') == 'set_defaults':
+        is_defaults_step = True
+        exclude_keys = ['remark']
+        if 'default_action' in first_step:
+            first_step['action'] = first_step['default_action']
+            exclude_keys.append('default_action')
+    
+    if is_defaults_step:
+        # 提取defaults
+        defaults = {k: v for k, v in first_step.items() if k not in exclude_keys}
+        # 移除defaults步骤
+        steps = steps[1:]
+        print_realtime(f"✅ 检测到defaults定义,提取参数: {defaults}")
+    
+    # 应用defaults到每个步骤
+    if defaults:
+        for idx, step in enumerate(steps):
+            print_realtime(f"🔧 步骤{idx+1}合并前: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
+            for key, value in defaults.items():
+                if key not in step:
+                    step[key] = value
+                    print_realtime(f"   ✅ 应用defaults: {key}={value}")
+                else:
+                    print_realtime(f"   ⏭️  跳过(已存在): {key}={step[key]}")
+            print_realtime(f"🔧 步骤{idx+1}合并后: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
+    
+    return steps
+
+
 def process_sequential_script(device, steps, device_report_dir, action_processor, max_duration=None, step_tracker: Optional[StepTracker]=None):
     """处理顺序执行脚本"""
     print_realtime("📝 开始按顺序执行脚本")
@@ -2365,10 +2916,8 @@ def replay_device(device, scripts, screenshot_queue, action_queue, click_queue, 
             print_realtime(f"⚠️ 脚本 {disp_name} 中未找到有效步骤，跳过")
             continue
 
-        # 为步骤设置默认action
-        for step in steps:
-            if "action" not in step:
-                step["action"] = "click"
+        # 注意：不在这里设置默认action，而是在apply_defaults_to_steps()之后设置
+        # 这样可以确保defaults中的action字段能够正确应用
 
         # 检查脚本类型
         is_priority_based = any("Priority" in step for step in steps)
@@ -2380,6 +2929,16 @@ def replay_device(device, scripts, screenshot_queue, action_queue, click_queue, 
         # 循环执行脚本
         for loop in range(script_loop_count):
             print_realtime(f"🔄 第 {loop + 1}/{script_loop_count} 次循环")
+            
+            # 应用defaults处理(每次循环都需要处理,因为steps可能被修改)
+            processed_steps = apply_defaults_to_steps(steps.copy() if isinstance(steps, list) else steps)
+            
+            # 在应用defaults之后，为仍然没有action字段的步骤设置默认值
+            # 这样既能让defaults中的action生效，又能为没有action的步骤提供兜底
+            for step in processed_steps:
+                if "action" not in step:
+                    step["action"] = "click"
+                    print_realtime(f"🔧 步骤 '{step.get('remark', '未命名')}' 缺少action字段，设置默认值: click")
 
             try:
                 # 启动脚本记录（一次循环视为一次脚本执行）
@@ -2398,17 +2957,17 @@ def replay_device(device, scripts, screenshot_queue, action_queue, click_queue, 
                             "loop-index": loop + 1,
                             "max-duration": max_duration,
                         },
-                        steps=steps
+                        steps=processed_steps
                     )
 
                 if is_priority_based:
                     executed = process_priority_based_script(
-                        device, steps, meta, device_report_dir, action_processor,
+                        device, processed_steps, meta, device_report_dir, action_processor,
                         screenshot_queue, click_queue, max_duration
                     )
                 else:
                     executed = process_sequential_script(
-                        device, steps, device_report_dir, action_processor, max_duration,
+                        device, processed_steps, device_report_dir, action_processor, max_duration,
                         step_tracker=tracker
                     )
                 if tracker:
@@ -3108,9 +3667,14 @@ def main():
                             try:
                                 row = DbScript.objects.all_teams().filter(id=script_id).values('id', 'steps').first()
                                 steps_list = row.get('steps') if row else None
-                                step_len = len(steps_list) if isinstance(steps_list, list) else 0
+                                if isinstance(steps_list, list):
+                                    # 处理 defaults 步骤，确保计算的是实际执行的步骤数
+                                    processed_steps = apply_defaults_to_steps(steps_list)
+                                    step_len = len(processed_steps)
+                                else:
+                                    step_len = 0
                                 total_script_steps += step_len * loop_count
-                                print_realtime(f"🗄️ 脚本ID={script_id} loop={loop_count} steps_len={step_len}")
+                                print_realtime(f"🗄️ 脚本ID={script_id} loop={loop_count} steps_len={step_len} (已处理defaults)")
                             except Exception as e:
                                 print_realtime(f"⚠️ 回表获取脚本 {script_id} 步骤失败: {e}")
                         planned_device_count = len(target_devices)

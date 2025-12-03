@@ -509,17 +509,12 @@ class ReportGenerator:
             # print(f"🔍 配置的模板路径: {template_path}")
 
             if not isinstance(template_path, Path) or not template_path.exists():
-                # 回退到通用查找
                 print(f"🔍 回退到通用查找")
                 template_path = find_template_path("log_template.html", self.report_manager)
 
             if not template_path or not template_path.exists():
                 error_msg = f"❌ 未找到单设备报告模板文件: {template_path}"
                 print(error_msg)
-                # 🔧 增强修复：输出更多调试信息
-                # print(f"🔍 配置的模板路径: {self.config.single_device_replay_template}")
-                # print(f"🔍 模板目录配置: {self.config.config.get('devices_report_paths', 'template_dir', fallback='未配置')}")
-                # print(f"🔍 尝试查找模板: {os.path.join(os.path.dirname(os.path.dirname(__file__)), 'staticfiles', 'reports', 'templates', 'log_template.html')}")
                 raise FileNotFoundError(error_msg)
 
             print(f"✅ 使用模板文件: {template_path}")

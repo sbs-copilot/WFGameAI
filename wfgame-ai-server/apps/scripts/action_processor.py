@@ -394,14 +394,54 @@ class ActionProcessor:
     def _process_action(self, step, step_idx, log_dir):
         """处理action步骤"""
         # 确保每个步骤开始时清空上一次的截图记录，避免把上一步的截图误填到当前步骤
-        try:
-            self._last_screenshot_path = None
-        except Exception:
-            pass
+
         step_action = step.get("action", "click")
         step_yolo_class = step.get("yolo_class")  # 修复: 确保step_yolo_class已定义
-        print(f"[DEBUG] _process_action called: step_action={step_action}, step_yolo_class={step_yolo_class}, step_idx={step_idx}, log_dir={log_dir}")
+        print(f"[DEBUG] _process_action called: step_action={step_action}, step_yolo_class={step_yolo_class}, step_idx={step_idx}")
+        
+        # 获取重试配置(默认值: max_retries=3, retry_interval=1秒)
+        max_retries = step.get("max_retries", 3)
+        retry_interval = step.get("retry_interval", 1)
+        
         # 预先初始化result变量，避免未赋值错误
+        result = ActionResult(
+            success=False,
+            message="步骤未执行",
+            details={"operation": step_action, "status": "not_executed"}
+        )
+        
+        # 执行步骤(带重试机制)
+        for attempt in range(max_retries):
+            if attempt > 0:
+                print(f"🔄 [步骤 {step_idx + 1}] 第 {attempt + 1}/{max_retries} 次重试...")
+                time.sleep(retry_interval)
+            
+            result = self._execute_single_action(step, step_idx, log_dir, step_action, step_yolo_class)
+            
+            # 如果成功或者是不需要重试的操作,直接返回
+            if result.success or step_action in ["delay", "log", "device_preparation"]:
+                if attempt > 0:
+                    print(f"✅ [步骤 {step_idx + 1}] 重试成功 (第 {attempt + 1} 次尝试)")
+                break
+        else:
+            # 所有重试都失败
+            print(f"❌ [步骤 {step_idx + 1}] 重试 {max_retries} 次后仍然失败")
+            result.details["retry_attempts"] = max_retries
+            result.details["all_retries_failed"] = True
+        
+        # 统一返回 ActionResult，便于上层获取 screenshot_path
+        if isinstance(result, tuple):
+            result = ActionResult.from_tuple(result)
+        elif not isinstance(result, ActionResult):
+            result = ActionResult(success=False, message=str(result))
+
+        # 如果没有显式截图路径但最近一次截图存在，补全
+        if not getattr(result, 'screenshot_path', None) and getattr(self, '_last_screenshot_path', None):
+            result.screenshot_path = self._last_screenshot_path
+        return result
+    
+    def _execute_single_action(self, step, step_idx, log_dir, step_action, step_yolo_class):
+        """执行单次操作(不包含重试逻辑)"""
         result = ActionResult(
             success=False,
             message="步骤未执行",
@@ -459,7 +499,7 @@ class ActionProcessor:
             print(f"🎯 执行备选点击操作")
             result = self._handle_fallback_click(step, step_idx, log_dir)
         elif step_action == "click":
-            # 检查是否有execute_action字段（点击后执行其他操作）
+            # 检查是否有execute_action字段（点击后执行其他操作click/input/checkbox）
             execute_action = step.get("execute_action")
             if execute_action:
                 print(f"🎯 检测到组合操作: click + {execute_action}")
@@ -650,17 +690,39 @@ class ActionProcessor:
                 details={"operation": "fallback_click", "error": str(e)}
             )
 
+    def _determine_detection_mode(self, step):
+        """判断检测模式: yolo_only | ocr_only | yolo_then_ocr"""
+        # 1. 显式指定模式
+        if "detection_mode" in step:
+            mode = step["detection_mode"]
+            if mode in ["yolo_only", "ocr_only", "yolo_then_ocr"]:
+                return mode
+            else:
+                print(f"⚠️ 无效的detection_mode: {mode}, 将自动推断")
+        
+        # 2. 自动推断模式
+        has_yolo = bool(step.get("yolo_class"))
+        has_ocr = bool(step.get("ocr_keywords"))
+        
+        if has_yolo and has_ocr:
+            return "yolo_then_ocr"  # YOLO预检+OCR过滤
+        elif has_yolo:
+            return "yolo_only"      # 纯YOLO
+        elif has_ocr:
+            return "ocr_only"       # 纯OCR
+        else:
+            return None  # 无效配置
+
     def _handle_ai_detection_click(self, step, step_idx, log_dir):
         print(f"[DEBUG] 进入_handle_ai_detection_click, step={step}, step_idx={step_idx}, log_dir={log_dir}")
-        print(f"[DEBUG] self.detect_buttons: {self.detect_buttons}")
 
-        step_class = step.get("yolo_class")
         step_remark = step.get("remark", "")
-        print(f"[DEBUG] step_class: {step_class}, step_remark: {step_remark}")
-
-        if not step_class or step_class == "unknown":
-            print(f"错误: AI检测点击步骤缺少有效的检测类别")
-            # 记录日志 executed=False
+        
+        # 判断检测模式
+        detection_mode = self._determine_detection_mode(step)
+        
+        if detection_mode is None:
+            print(f"❌ 错误: AI检测点击步骤必须指定 yolo_class 或 ocr_keywords")
             timestamp = time.time()
             ai_entry = {
                 "tag": "function",
@@ -668,7 +730,7 @@ class ActionProcessor:
                 "time": timestamp,
                 "data": {
                     "name": "ai_detection_click",
-                    "call_args": {"target_class": step_class},
+                    "call_args": {},
                     "start_time": timestamp,
                     "ret": None,
                     "end_time": timestamp,
@@ -679,60 +741,77 @@ class ActionProcessor:
             self._write_log_entry(ai_entry)
             return ActionResult(
                 success=False,
-                message="AI检测点击步骤缺少有效的检测类别",
-                details={"operation": "ai_detection_click", "error": "invalid_class"},
+                message="AI检测点击步骤必须指定 yolo_class 或 ocr_keywords",
+                details={"operation": "ai_detection_click", "error": "invalid_config"},
                 executed=False
             )
+        
+        print(f"🔍 检测模式: {detection_mode}")
+        
+        # 根据模式分发到不同的处理方法
+        if detection_mode == "yolo_only":
+            return self._handle_yolo_only_detection(step, step_idx, log_dir)
+        elif detection_mode == "ocr_only":
+            return self._handle_ocr_only_detection(step, step_idx, log_dir)
+        elif detection_mode == "yolo_then_ocr":
+            return self._handle_yolo_then_ocr_detection(step, step_idx, log_dir)
+    
+    def _create_failed_result(self, target, remark, error_type):
+        """创建失败结果的辅助方法"""
+        timestamp = time.time()
+        ai_entry = {
+            "tag": "function",
+            "depth": 1,
+            "time": timestamp,
+            "data": {
+                "name": "ai_detection_click",
+                "call_args": {"target": target},
+                "start_time": timestamp,
+                "ret": None,
+                "end_time": timestamp,
+                "desc": remark or "AI检测点击",
+                "executed": False
+            }
+        }
+        self._write_log_entry(ai_entry)
+        return ActionResult(
+            success=False,
+            message=f"AI检测失败: {error_type}",
+            details={"operation": "ai_detection_click", "error": error_type},
+            executed=False
+        )
+    
+    def _handle_yolo_only_detection(self, step, step_idx, log_dir):
+        """处理纯YOLO检测模式"""
+        step_class = step.get("yolo_class")
+        step_remark = step.get("remark", "")
+        print(f"[YOLO模式] 目标类别: {step_class}")
 
         try:
-            # print(f"\n================ [AI调试] 检测前 ==================")
-            print(f"[AI调试] 目标类别: {step_class}")
-            # 获取屏幕截图
             screenshot = get_device_screenshot(self.device)
             if screenshot is None:
                 print(f"❌ 无法获取设备屏幕截图")
-                # 记录日志 executed=False
-                timestamp = time.time()
-                ai_entry = {
-                    "tag": "function",
-                    "depth": 1,
-                    "time": timestamp,
-                    "data": {
-                        "name": "ai_detection_click",
-                        "call_args": {"target_class": step_class},
-                        "start_time": timestamp,
-                        "ret": None,
-                        "end_time": timestamp,
-                        "desc": step_remark or "AI检测点击",
-                        "executed": False
-                    }
-                }
-                self._write_log_entry(ai_entry)
-                return ActionResult(
-                    success=False,
-                    message="无法获取设备屏幕截图",
-                    details={"operation": "ai_detection_click", "error": "screenshot_failed"},
-                    executed=False
-                )
+                return self._create_failed_result(step_class, step_remark, "screenshot_failed")
+            
             frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-            # print(f"[AI调试] 输入图片shape: {frame.shape}")
-            # print(f"[AI调试] 步骤置信度阈值: {step.get('confidence', 0.6)}")
-            # print(f"[AI调试] 设备分辨率: {frame.shape[1]}x{frame.shape[0]}")
-            # print(f"[AI调试] =========================================\n")
 
-            # 使用AI检测（如果可用）
             if self.detect_buttons:
-                # 获取步骤中指定的置信度，如果没有则使用默认值 0.6
-                step_confidence = step.get("confidence", 0.6)
-                print(f"🎯 使用置信度阈值: {step_confidence} (步骤指定: {step.get('confidence', '默认')})")
-                success, detection_result = self.detect_buttons(frame, target_class=step_class, conf_threshold=step_confidence)
-                print(f"🔍 AI检测输出: success={success}, detection_result={detection_result}")
+                step_confidence = step.get("confidence", 0.35)
+                print(f"🎯 YOLO置信度阈值: {step_confidence}")
+                
+                # 纯YOLO模式,不使用OCR
+                success, detection_result = self.detect_buttons(
+                    frame, 
+                    target_class=step_class, 
+                    conf_threshold=step_confidence,
+                    use_ocr=False
+                )
+                print(f"🔍 YOLO检测输出: success={success}")
 
                 timestamp = time.time()
                 if success and detection_result[0] is not None:
-                    x, y, detected_class = detection_result
+                    x, y, detected_class, _ = detection_result
 
-                    # 操作前截图，确保显示待点击目标
                     screen_data = self._create_unified_screen_object(
                         log_dir,
                         pos_list=[[int(x), int(y)]],
@@ -740,16 +819,25 @@ class ActionProcessor:
                         rect_info=[{"left":int(x)-20,"top":int(y)-20,"width":40,"height":40}]
                     )
 
-                    # 执行点击操作
+                    print(f"🖱️ 执行点击操作: input tap {int(x)} {int(y)}")
+                    timestamp_before_click = time.time()
                     self.device.shell(f"input tap {int(x)} {int(y)}")
+                    timestamp_after_click = time.time()
+                    print(f"✅ 点击命令已发送")
 
+                    call_args = {
+                        "detection_mode": "yolo_only",
+                        "target_class": step_class, 
+                        "position": [int(x), int(y)]
+                    }
+                    
                     ai_entry = {
                         "tag": "function",
                         "depth": 1,
                         "time": timestamp,
                         "data": {
                             "name": "ai_detection_click",
-                            "call_args": {"target_class": step_class, "position": [int(x), int(y)]},
+                            "call_args": call_args,
                             "start_time": timestamp,
                             "ret": [int(x), int(y)],
                             "end_time": timestamp,
@@ -822,6 +910,214 @@ class ActionProcessor:
             return ActionResult(
                 success=False,
                 message=f"AI检测点击异常: {str(e)}",
+                details={"operation": "ai_detection_click", "error": str(e)},
+                executed=False
+            )
+    
+    def _handle_ocr_only_detection(self, step, step_idx, log_dir):
+        """处理纯OCR检测模式(全屏搜索)"""
+        ocr_keywords = step.get("ocr_keywords")
+        ocr_min_score = step.get("ocr_min_score", 0.5)
+        step_remark = step.get("remark", "")
+        print(f"[OCR模式] 关键字: {ocr_keywords}, 最小置信度: {ocr_min_score}")
+        
+        try:
+            screenshot = get_device_screenshot(self.device)
+            if screenshot is None:
+                print(f"❌ 无法获取设备屏幕截图")
+                return self._create_failed_result(ocr_keywords, step_remark, "screenshot_failed")
+            
+            frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+            
+            # 调用replay_script中的全屏OCR检测函数
+            from apps.scripts.replay_script import perform_fullscreen_ocr_detection
+            
+            success, result = perform_fullscreen_ocr_detection(
+                frame,
+                ocr_keywords=ocr_keywords,
+                ocr_min_score=ocr_min_score
+            )
+            
+            timestamp = time.time()
+            if success and result:
+                x, y = result["position"]
+                ocr_text = result["text"]
+                ocr_score = result["score"]
+                
+                print(f"✅ OCR找到文本: {ocr_text} (置信度: {ocr_score:.2f}) 位置: ({x}, {y})")
+                
+                # 验证坐标是否在屏幕范围内
+                screen_width = frame.shape[1]
+                screen_height = frame.shape[0]
+                print(f"🔍 屏幕尺寸: {screen_width}x{screen_height}, 点击坐标: ({x}, {y})")
+                
+                if x < 0 or x > screen_width or y < 0 or y > screen_height:
+                    print(f"⚠️ 警告: 点击坐标超出屏幕范围!")
+                
+                screen_data = self._create_unified_screen_object(
+                    log_dir,
+                    pos_list=[[int(x), int(y)]],
+                    confidence=ocr_score,
+                    rect_info=[{"left":int(x)-20,"top":int(y)-20,"width":40,"height":40}]
+                )
+                
+                print(f"🖱️ 执行点击操作: input tap {int(x)} {int(y)}")
+                self.device.shell(f"input tap {int(x)} {int(y)}")
+                print(f"✅ 点击命令已发送")
+                
+                call_args = {
+                    "detection_mode": "ocr_only",
+                    "ocr_keywords": ocr_keywords,
+                    "ocr_text": ocr_text,
+                    "ocr_score": ocr_score,
+                    "position": [int(x), int(y)]
+                }
+                
+                ai_entry = {
+                    "tag": "function",
+                    "depth": 1,
+                    "time": timestamp,
+                    "data": {
+                        "name": "ai_detection_click",
+                        "call_args": call_args,
+                        "start_time": timestamp,
+                        "ret": [int(x), int(y)],
+                        "end_time": timestamp,
+                        "desc": step_remark or f"OCR检测点击({ocr_keywords})",
+                        "executed": True
+                    }
+                }
+                if screen_data:
+                    ai_entry["data"]["screen"] = screen_data
+                self._write_log_entry(ai_entry)
+                
+                return ActionResult(
+                    success=True,
+                    message=f"OCR检测点击成功: {ocr_text}",
+                    details={"operation": "ai_detection_click", "ocr_text": ocr_text, "position": [int(x), int(y)]},
+                    executed=True
+                )
+            else:
+                print(f"❌ OCR未找到匹配的文本: {ocr_keywords}")
+                return ActionResult(
+                    success=False,
+                    message=f"OCR未找到匹配的文本: {ocr_keywords}",
+                    details={"operation": "ai_detection_click", "ocr_keywords": ocr_keywords},
+                    executed=False
+                )
+                
+        except Exception as e:
+            print(f"❌ OCR检测过程中发生异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return ActionResult(
+                success=False,
+                message=f"OCR检测异常: {str(e)}",
+                details={"operation": "ai_detection_click", "error": str(e)},
+                executed=False
+            )
+    
+    def _handle_yolo_then_ocr_detection(self, step, step_idx, log_dir):
+        """处理YOLO+OCR组合检测模式"""
+        step_class = step.get("yolo_class")
+        ocr_keywords = step.get("ocr_keywords")
+        step_remark = step.get("remark", "")
+        print(f"[YOLO+OCR模式] YOLO类别: {step_class}, OCR关键字: {ocr_keywords}")
+        
+        try:
+            screenshot = get_device_screenshot(self.device)
+            if screenshot is None:
+                print(f"❌ 无法获取设备屏幕截图")
+                return self._create_failed_result(f"{step_class}+{ocr_keywords}", step_remark, "screenshot_failed")
+            
+            frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+            
+            if self.detect_buttons:
+                step_confidence = step.get("confidence", 0.35)
+                ocr_min_score = step.get("ocr_min_score", 0.5)
+                
+                print(f"🎯 YOLO置信度: {step_confidence}, OCR最小置信度: {ocr_min_score}")
+                
+                # YOLO+OCR组合模式
+                success, detection_result = self.detect_buttons(
+                    frame,
+                    target_class=step_class,
+                    conf_threshold=step_confidence,
+                    use_ocr=True,
+                    ocr_keywords=ocr_keywords,
+                    ocr_min_score=ocr_min_score
+                )
+                
+                timestamp = time.time()
+                if success and detection_result[0] is not None:
+                    x, y, detected_class, ocr_result = detection_result
+                    
+                    screen_data = self._create_unified_screen_object(
+                        log_dir,
+                        pos_list=[[int(x), int(y)]],
+                        confidence=step_confidence,
+                        rect_info=[{"left":int(x)-20,"top":int(y)-20,"width":40,"height":40}]
+                    )
+                    
+                    print(f"🖱️ 执行点击操作: input tap {int(x)} {int(y)}")
+                    timestamp_before_click = time.time()
+                    self.device.shell(f"input tap {int(x)} {int(y)}")
+                    timestamp_after_click = time.time()
+                    print(f"✅ 点击命令已发送")
+                    
+                    call_args = {
+                        "detection_mode": "yolo_then_ocr",
+                        "target_class": step_class,
+                        "position": [int(x), int(y)]
+                    }
+                    if ocr_result:
+                        call_args["ocr_texts"] = ocr_result.get("texts", [])
+                        call_args["ocr_scores"] = ocr_result.get("scores", [])
+                        call_args["ocr_matched"] = ocr_result.get("has_match", False)
+                    
+                    ai_entry = {
+                        "tag": "function",
+                        "depth": 1,
+                        "time": timestamp,
+                        "data": {
+                            "name": "ai_detection_click",
+                            "call_args": call_args,
+                            "start_time": timestamp,
+                            "ret": [int(x), int(y)],
+                            "end_time": timestamp,
+                            "desc": step_remark or f"YOLO+OCR检测点击({step_class}+{ocr_keywords})",
+                            "executed": True
+                        }
+                    }
+                    if screen_data:
+                        ai_entry["data"]["screen"] = screen_data
+                    self._write_log_entry(ai_entry)
+                    
+                    return ActionResult(
+                        success=True,
+                        message=f"YOLO+OCR检测点击成功: {step_class}",
+                        details={"operation": "ai_detection_click", "target_class": step_class, "position": [int(x), int(y)]},
+                        executed=True
+                    )
+                else:
+                    print(f"❌ YOLO+OCR未找到匹配目标")
+                    return ActionResult(
+                        success=False,
+                        message=f"YOLO+OCR未找到匹配目标: {step_class}+{ocr_keywords}",
+                        details={"operation": "ai_detection_click", "target_class": step_class, "ocr_keywords": ocr_keywords},
+                        executed=False
+                    )
+            else:
+                print(f"❌ AI检测功能不可用")
+                return self._create_failed_result(step_class, step_remark, "ai_detection_unavailable")
+                
+        except Exception as e:
+            print(f"❌ YOLO+OCR检测过程中发生异常: {e}")
+            import traceback
+            traceback.print_exc()
+            return ActionResult(
+                success=False,
+                message=f"YOLO+OCR检测异常: {str(e)}",
                 details={"operation": "ai_detection_click", "error": str(e)},
                 executed=False
             )
@@ -2957,9 +3253,69 @@ class ActionProcessor:
             import json
             script_json = json.loads(script_content)
 
-            # 读取全局弹窗处理参数
-            meta = script_json.get('meta', {})            # 执行每个步骤
-            for step_idx, step in enumerate(script_json.get('steps', [])):
+            # 兼容两种脚本格式
+            # 格式1: 数组格式 [{step1}, {step2}] - 前端脚本编辑器使用
+            # 格式2: 对象格式 {"defaults": {...}, "steps": [...]} - 精简版本使用
+            if isinstance(script_json, list):
+                # 数组格式
+                print("📋 检测到数组格式脚本")
+                steps = script_json
+                defaults = {}
+                meta = {}
+                
+                # 检查第一个步骤是否是defaults定义
+                if len(steps) > 0:
+                    first_step = steps[0]
+                    # 支持多种标记方式
+                    is_defaults_step = False
+                    exclude_keys = []
+                    
+                    if first_step.get('step_type') == 'defaults':
+                        # 方式1: step_type="defaults" (推荐)
+                        is_defaults_step = True
+                        exclude_keys = ['step_type', 'remark']
+                    elif first_step.get('is_defaults') == True:
+                        # 方式2: is_defaults=true
+                        is_defaults_step = True
+                        exclude_keys = ['is_defaults', 'remark']
+                    elif first_step.get('action') == 'set_defaults':
+                        # 方式3: action="set_defaults"
+                        # 这种方式下,action字段本身是标记,真正的action应该在default_action字段
+                        is_defaults_step = True
+                        exclude_keys = ['action', 'remark']
+                        # 如果有default_action字段,将其重命名为action
+                        if 'default_action' in first_step:
+                            first_step['action'] = first_step['default_action']
+                            exclude_keys.append('default_action')
+                    
+                    if is_defaults_step:
+                        # 第一个步骤是defaults定义,提取所有参数(排除标记字段)
+                        defaults = {k: v for k, v in first_step.items() 
+                                   if k not in exclude_keys}
+                        steps = steps[1:]  # 移除defaults步骤
+                        print(f"   应用全局默认值: {defaults}")
+                        print(f"   排除的字段: {exclude_keys}")
+            else:
+                # 对象格式
+                print("📋 检测到对象格式脚本")
+                steps = script_json.get('steps', [])
+                defaults = script_json.get('defaults', {})
+                meta = script_json.get('meta', {})
+                if defaults:
+                    print(f"   应用全局默认值: {defaults}")
+            
+            # 执行每个步骤
+            for step_idx, step in enumerate(steps):
+                # 合并全局默认值到步骤(步骤中的值优先级更高)
+                if defaults:
+                    print(f"\n🔧 步骤 {step_idx + 1} 合并前: {step}")
+                    for key, value in defaults.items():
+                        if key not in step:
+                            step[key] = value
+                            print(f"   ✅ 应用defaults: {key}={value}")
+                        else:
+                            print(f"   ⏭️  跳过(已存在): {key}={step[key]}")
+                    print(f"🔧 步骤 {step_idx + 1} 合并后: {step}")
                 # 兼容两种脚本格式：新格式使用action字段，旧格式使用class字段
                 action = step.get('action')
                 step_class = step.get('class', '')
@@ -3083,7 +3439,7 @@ class ActionProcessor:
 
                     # 新增支持: AI检测点击操作 (Priority模式)
                     elif action == 'ai_detection_click':
-                        print(f"🎯 执行AI检测点击操作")
+                        print(f"🎯 执行AI检测点击操作:")
                         success = self._route_to_action_processor(step, step_idx, 'ai_detection_click')
                         if not success:
                             print(f"❌ ai_detection_click 操作失败")
@@ -3356,10 +3712,32 @@ class ActionProcessor:
             # 使用AI检测（如果可用）
             if self.detect_buttons:
                 step_confidence = step.get("confidence", 0.6)
-                success, detection_result = self.detect_buttons(frame, target_class=step_class, conf_threshold=step_confidence)
+                
+                # 提取OCR相关参数
+                use_ocr = step.get("use_ocr", False)
+                ocr_keywords = step.get("ocr_keywords", None)
+                ocr_min_score = step.get("ocr_min_score", 0.5)
+                
+                if use_ocr:
+                    print(f"🔍 [Priority模式] OCR已启用 - 关键字: {ocr_keywords}, 最小置信度: {ocr_min_score}")
+                
+                success, detection_result = self.detect_buttons(
+                    frame, 
+                    target_class=step_class, 
+                    conf_threshold=step_confidence,
+                    use_ocr=use_ocr,
+                    ocr_keywords=ocr_keywords,
+                    ocr_min_score=ocr_min_score
+                )
 
                 if success and detection_result[0] is not None:
-                    x, y, detected_class = detection_result
+                    # 解包检测结果,包含可选的OCR结果
+                    if len(detection_result) >= 4:
+                        x, y, detected_class, ocr_result = detection_result
+                    else:
+                        # 兼容旧版本返回格式
+                        x, y, detected_class = detection_result[:3]
+                        ocr_result = None
 
                     # 执行点击操作
                     self.device.shell(f"input tap {int(x)} {int(y)}")
@@ -3373,13 +3751,24 @@ class ActionProcessor:
                     )
 
                     timestamp = time.time()
+                    
+                    # 构建日志条目,包含OCR信息
+                    call_args = {
+                        "target_class": step_class, 
+                        "position": [int(x), int(y)]
+                    }
+                    if use_ocr and ocr_result:
+                        call_args["ocr_texts"] = ocr_result.get("texts", [])
+                        call_args["ocr_scores"] = ocr_result.get("scores", [])
+                        call_args["ocr_matched"] = ocr_result.get("has_match", False)
+                    
                     ai_entry = {
                         "tag": "function",
                         "depth": 1,
                         "time": timestamp,
                         "data": {
                             "name": "ai_detection_click",
-                            "call_args": {"target_class": step_class, "position": [int(x), int(y)]},
+                            "call_args": call_args,
                             "start_time": timestamp,
                             "ret": [int(x), int(y)],
                             "end_time": timestamp,
