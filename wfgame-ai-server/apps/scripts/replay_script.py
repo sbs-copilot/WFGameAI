@@ -76,6 +76,7 @@ def _get_ocr_pipeline():
     """获取全局OCR Pipeline单例,线程安全的懒加载"""
     global _OCR_PIPELINE, _OCR_PIPELINE_LOCK
     
+    # 快速路径：已初始化则直接返回，不输出日志
     if _OCR_PIPELINE is not None:
         return _OCR_PIPELINE
     
@@ -86,15 +87,16 @@ def _get_ocr_pipeline():
     
     # 双重检查锁定模式
     with _OCR_PIPELINE_LOCK:
+        # 再次检查，避免多线程竞争
         if _OCR_PIPELINE is not None:
             return _OCR_PIPELINE
         
         try:
             from paddlex import create_pipeline
-            print_realtime("🔧 初始化全局OCR Pipeline...")
+            print_realtime("🔧 [全局单例] 初始化OCR Pipeline...")
             # 使用最简单的配置,预处理参数在predict时传入
             _OCR_PIPELINE = create_pipeline(pipeline="OCR")
-            print_realtime("✅ 全局OCR Pipeline初始化完成")
+            print_realtime("✅ [全局单例] OCR Pipeline初始化完成，后续调用将直接复用")
             return _OCR_PIPELINE
         except Exception as e:
             msg = f"❌ OCR Pipeline初始化失败: {e}"
@@ -1422,25 +1424,39 @@ def load_script_content(script_cfg):
 
     # 2) 数据库ID模式
     if isinstance(script_cfg, dict) and script_cfg.get('script_id'):
-        DbScript = _get_db_script_model()
-        if DbScript is None:
-            raise RuntimeError("无法导入Script模型，无法通过ID加载脚本")
-        s = DbScript.objects.all_teams().filter(id=script_cfg['script_id']).first()
-        if not s:
-            raise FileNotFoundError(f"脚本ID不存在: {script_cfg['script_id']}")
-        steps = (s.steps or [])
-        meta = (s.meta or {})
-        
-        # 处理 defaults 步骤：识别并移除，避免被当作普通步骤执行
-        steps = apply_defaults_to_steps(steps)
+        # 🔧 优化：优先使用主进程缓存的处理结果，避免重复处理defaults
+        if '_processed_steps' in script_cfg:
+            steps = script_cfg['_processed_steps']
+            # 仍需从数据库获取meta和name
+            DbScript = _get_db_script_model()
+            if DbScript is None:
+                raise RuntimeError("无法导入Script模型，无法通过ID加载脚本")
+            s = DbScript.objects.all_teams().filter(id=script_cfg['script_id']).first()
+            if not s:
+                raise FileNotFoundError(f"脚本ID不存在: {script_cfg['script_id']}")
+            meta = (s.meta or {})
+            name = getattr(s, 'name', f"script_{script_cfg['script_id']}")
+        else:
+            # 回退到原有逻辑：从数据库加载并处理
+            DbScript = _get_db_script_model()
+            if DbScript is None:
+                raise RuntimeError("无法导入Script模型，无法通过ID加载脚本")
+            s = DbScript.objects.all_teams().filter(id=script_cfg['script_id']).first()
+            if not s:
+                raise FileNotFoundError(f"脚本ID不存在: {script_cfg['script_id']}")
+            steps = (s.steps or [])
+            meta = (s.meta or {})
+            name = getattr(s, 'name', f"script_{script_cfg['script_id']}")
+            
+            # 处理 defaults 步骤：识别并移除，避免被当作普通步骤执行
+            steps = apply_defaults_to_steps(steps)
         
         # 补充脚本ID到 meta，便于 StepTracker 直接使用
         try:
             if 'id' not in meta or meta.get('id') is None:
-                meta['id'] = s.id
+                meta['id'] = script_cfg['script_id']
         except Exception:
             pass
-        name = getattr(s, 'name', f"script_{script_cfg['script_id']}")
         return steps, meta, name
 
     # 3) 回退：尝试文件路径（即使不存在也能触发后续错误处理）
@@ -1556,23 +1572,6 @@ model = None
 
 
 
-# 导入load_yolo_model函数
-try:
-    from utils import load_yolo_model
-    print_realtime("✅ 成功导入load_yolo_model函数")
-except ImportError:
-    try:
-        # 尝试从项目根目录导入
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
-        if project_root not in sys.path:
-            sys.path.insert(0, project_root)
-        from utils import load_yolo_model
-        print_realtime("✅ 从项目根目录成功导入load_yolo_model函数")
-    except ImportError:
-        print_realtime("⚠️ 无法导入load_yolo_model函数")
-        load_yolo_model = None
-
-
 def load_yolo_model_for_detection():
     """只从config.ini的[paths]段读取model_path加载YOLO模型，未找到直接抛异常。禁止使用绝对路径。"""
     global model
@@ -1589,13 +1588,7 @@ def load_yolo_model_for_detection():
         # 获取项目根目录并定位 config.ini
         from pathlib import Path
         project_root = Path(__file__).resolve().parents[3]
-        # config_path = project_root / 'config.ini'
-        # print("config_path : ", config_path)
-        # if not config_path.exists():
-        #     raise FileNotFoundError(f"未找到配置文件: {config_path}")
-        # 读取配置，必须用ExtendedInterpolation保证变量递归替换
-        # config = configparser.ConfigParser(interpolation=configparser.ExtendedInterpolation())
-        # config.read(str(config_path), encoding='utf-8')
+
         config = settings.CFG._config
         if 'paths' not in config or 'model_path' not in config['paths']:
             raise KeyError("config.ini的[paths]段未配置model_path")
@@ -2580,9 +2573,9 @@ def apply_defaults_to_steps(steps):
             for key, value in defaults.items():
                 if key not in step:
                     step[key] = value
-                    print_realtime(f"   ✅ 应用defaults: {key}={value}")
-                else:
-                    print_realtime(f"   ⏭️  跳过(已存在): {key}={step[key]}")
+                #     print_realtime(f"   ✅ 应用defaults: {key}={value}")
+                # else:
+                #     print_realtime(f"   ⏭️  跳过(已存在): {key}={step[key]}")
             print_realtime(f"🔧 步骤{idx+1}合并后: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
     
     return steps
@@ -3655,10 +3648,12 @@ def main():
                     devices = [d for d in devices if d.serial in set(device_serials)]
 
                 # 🔧 预计算任务总步数（单次，回表，不再写入或读取Redis）
+                # 🔧 优化：在主进程中统一处理defaults，避免每个设备重复处理
                 if task_id:
                     try:
                         DbScript = _get_db_script_model()
                         total_script_steps = 0
+                        print_realtime("🔧 [主进程] 开始统一处理脚本defaults配置...")
                         for script in scripts:
                             script_id = script.get('script_id')
                             loop_count = script.get('loop_count', 1)
@@ -3671,12 +3666,15 @@ def main():
                                     # 处理 defaults 步骤，确保计算的是实际执行的步骤数
                                     processed_steps = apply_defaults_to_steps(steps_list)
                                     step_len = len(processed_steps)
+                                    # 🔧 关键优化：将处理后的步骤缓存到script配置中，避免worker重复处理
+                                    script['_processed_steps'] = processed_steps
                                 else:
                                     step_len = 0
                                 total_script_steps += step_len * loop_count
                                 print_realtime(f"🗄️ 脚本ID={script_id} loop={loop_count} steps_len={step_len} (已处理defaults)")
                             except Exception as e:
                                 print_realtime(f"⚠️ 回表获取脚本 {script_id} 步骤失败: {e}")
+                        print_realtime("✅ [主进程] defaults配置处理完成，后续设备将直接使用处理结果")
                         planned_device_count = len(target_devices)
                         single_device_steps = total_script_steps
                         global_total_steps = single_device_steps * planned_device_count if planned_device_count > 0 else single_device_steps
@@ -3864,21 +3862,21 @@ def main():
                         report_url = str(device_report_dir)
                         print_realtime(f"📂 设备报告目录: {device_report_dir}")
                 # 如果是单设备模式，则允许生成汇总报告
-                elif current_execution_device_dirs and not is_multi_device and REPORT_GENERATOR:
-                    print_realtime("📊 单设备模式，生成汇总报告...")
-                    # 转换字符串路径为Path对象
-                    from pathlib import Path
-                    device_report_paths = [Path(dir_path) for dir_path in current_execution_device_dirs]
-                    summary_report_path = REPORT_GENERATOR.generate_summary_report(
-                        device_report_paths,
-                        scripts  # 传入脚本列表
-                    )
-                    if summary_report_path:
-                        # Convert Path object to string for JSON serialization
-                        report_url = str(summary_report_path)
-                        print_realtime(f"✅ 汇总报告已生成: {summary_report_path}")
-                    else:
-                        print_realtime("⚠️ 汇总报告生成失败")
+                # elif current_execution_device_dirs and not is_multi_device and REPORT_GENERATOR:
+                #     print_realtime("📊 单设备模式，生成汇总报告...")
+                #     # 转换字符串路径为Path对象
+                #     from pathlib import Path
+                #     device_report_paths = [Path(dir_path) for dir_path in current_execution_device_dirs]
+                #     summary_report_path = REPORT_GENERATOR.generate_summary_report(
+                #         device_report_paths,
+                #         scripts  # 传入脚本列表
+                #     )
+                #     if summary_report_path:
+                #         # Convert Path object to string for JSON serialization
+                #         report_url = str(summary_report_path)
+                #         print_realtime(f"✅ 汇总报告已生成: {summary_report_path}")
+                #     else:
+                #         print_realtime("⚠️ 汇总报告生成失败")
 
                 print_realtime("✅ 脚本回放执行完成")
                 # 更新状态：业务逻辑执行完成
@@ -4026,10 +4024,6 @@ def get_confidence_threshold_from_config():
     从config.ini的[settings]节读取AI检测置信度阈值。
     若未配置则返回默认值0.6。
     """
-    # config = configparser.ConfigParser()
-    # # 构造config.ini的绝对路径（假设本文件在wfgame-ai-server\apps\scripts下）
-    # config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 'config.ini')
-    # config.read(config_path, encoding='utf-8')
     config = settings.CFG._config
     try:
         # 优先从[settings]读取confidence_threshold，没有则用默认值0.6

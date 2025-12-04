@@ -1344,68 +1344,68 @@ def replay_script(request):
                     logger.warning(f"views 释放设备账号时出错: {e}")
 
             # 生成汇总报告 - 在所有设备完成后由主进程统一生成
-            if device_dirs and len(device_dirs) > 0:
-                try:
-                    # 导入报告生成器
-                    from apps.reports.report_generator import ReportGenerator
-                    from apps.reports.report_manager import ReportManager
+            # if device_dirs and len(device_dirs) > 0:
+            #     try:
+            #         # 导入报告生成器
+            #         from apps.reports.report_generator import ReportGenerator
+            #         from apps.reports.report_manager import ReportManager
 
-                    # 初始化报告管理器
-                    report_manager = ReportManager()
-                    report_generator = ReportGenerator(report_manager)
+            #         # 初始化报告管理器
+            #         report_manager = ReportManager()
+            #         report_generator = ReportGenerator(report_manager)
 
-                    logger.info(f"📊 所有设备测试完成，开始生成统一汇总报告...")
+            #         logger.info(f"📊 所有设备测试完成，开始生成统一汇总报告...")
 
-                    # 将字符串路径转换为Path对象
-                    from pathlib import Path
-                    device_report_paths = []
+            #         # 将字符串路径转换为Path对象
+            #         from pathlib import Path
+            #         device_report_paths = []
 
-                    # 验证设备目录是否存在
-                    for dir_path in device_dirs:
-                        path = Path(dir_path)
-                        if path.exists():
-                            device_report_paths.append(path)
-                            logger.info(f"✅ 设备目录存在: {path}")
-                        else:
-                            logger.warning(f"⚠️ 设备目录不存在: {path}")
+            #         # 验证设备目录是否存在
+            #         for dir_path in device_dirs:
+            #             path = Path(dir_path)
+            #             if path.exists():
+            #                 device_report_paths.append(path)
+            #                 logger.info(f"✅ 设备目录存在: {path}")
+            #             else:
+            #                 logger.warning(f"⚠️ 设备目录不存在: {path}")
 
-                    # 如果没有有效的设备目录，尝试查找最新的设备目录
-                    if not device_report_paths:
-                        logger.warning("⚠️ 没有有效的设备目录，尝试查找最新的设备目录...")
-                        base_dir = report_manager.single_device_reports_dir
-                        if base_dir.exists():
-                            # 查找所有设备目录
-                            all_device_dirs = [d for d in base_dir.iterdir() if d.is_dir()]
-                            if all_device_dirs:
-                                # 按修改时间排序，选择最近的目录
-                                device_report_paths = sorted(all_device_dirs, key=lambda x: x.stat().st_mtime, reverse=True)[:len(devices)]
-                                logger.info(f"✅ 找到 {len(device_report_paths)} 个最新设备目录")
+            #         # 如果没有有效的设备目录，尝试查找最新的设备目录
+            #         if not device_report_paths:
+            #             logger.warning("⚠️ 没有有效的设备目录，尝试查找最新的设备目录...")
+            #             base_dir = report_manager.single_device_reports_dir
+            #             if base_dir.exists():
+            #                 # 查找所有设备目录
+            #                 all_device_dirs = [d for d in base_dir.iterdir() if d.is_dir()]
+            #                 if all_device_dirs:
+            #                     # 按修改时间排序，选择最近的目录
+            #                     device_report_paths = sorted(all_device_dirs, key=lambda x: x.stat().st_mtime, reverse=True)[:len(devices)]
+            #                     logger.info(f"✅ 找到 {len(device_report_paths)} 个最新设备目录")
 
-                    # 准备脚本配置
-                    script_info_list = []
-                    for config in script_configs:
-                        script_info_list.append({
-                            "path": config.get("path", ""),
-                            "loop_count": config.get("loop_count", 1),
-                            "max_duration": config.get("max_duration")
-                        })
+            #         # 准备脚本配置
+            #         script_info_list = []
+            #         for config in script_configs:
+            #             script_info_list.append({
+            #                 "path": config.get("path", ""),
+            #                 "loop_count": config.get("loop_count", 1),
+            #                 "max_duration": config.get("max_duration")
+            #             })
 
-                    # 1. 首先为每个设备目录生成设备报告
-                    for device_dir in device_report_paths:
-                        logger.info(f"🔄 为设备 {device_dir.name} 生成设备报告...")
-                        report_generator.generate_device_report(device_dir, script_info_list)
+            #         # 1. 首先为每个设备目录生成设备报告
+            #         for device_dir in device_report_paths:
+            #             logger.info(f"🔄 为设备 {device_dir.name} 生成设备报告...")
+            #             report_generator.generate_device_report(device_dir, script_info_list)
 
-                    # 2. 然后生成汇总报告
-                    summary_report_path = report_generator.generate_summary_report(device_report_paths, script_info_list)
+            #         # 2. 然后生成汇总报告
+            #         summary_report_path = report_generator.generate_summary_report(device_report_paths, script_info_list)
 
-                    if summary_report_path:
-                        logger.info(f"✅ 统一汇总报告生成成功: {summary_report_path}")
-                    else:
-                        logger.error("❌ 统一汇总报告生成失败")
-                except Exception as e:
-                    logger.error(f"❌ 生成统一汇总报告失败: {e}")
+            #         if summary_report_path:
+            #             logger.info(f"✅ 统一汇总报告生成成功: {summary_report_path}")
+            #         else:
+            #             logger.error("❌ 统一汇总报告生成失败")
+            #     except Exception as e:
+            #         logger.error(f"❌ 生成统一汇总报告失败: {e}")
 
-                    traceback.print_exc()
+            #         traceback.print_exc()
 
             # 生成设备执行摘要
             logger.info("============================================================")

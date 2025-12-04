@@ -17,7 +17,7 @@ conda activate py310_paddlex_gpu
 
 使用
  → 线上环境绑定 8000
-python start_wfgame_ai.py --config config.ini
+python start_wfgame_ai.py --config config.ini   
 
  → 开发环境绑定 9000
 python start_wfgame_ai.py --config config_dev.ini
