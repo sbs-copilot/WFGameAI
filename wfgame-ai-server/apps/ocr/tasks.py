@@ -12,6 +12,11 @@ from celery import shared_task
 import traceback
 import datetime
 import time
+import json
+import base64
+import io
+from PIL import Image
+from django.template.loader import render_to_string
 
 from .models import OCRTask, OCRResult, OCRGitRepository, OCRCache, OCRCacheHit
 from apps.ocr.services.ocr_service import OCRService
@@ -25,6 +30,39 @@ from .services.gitlab import (
 )
 from .services.path_utils import PathUtils
 from apps.notifications.tasks import notify_ocr_task_progress
+from .services.compare_service import TransRepoConfig
+from .serializers import OCRTaskSerializer, OCRResultSerializer
+from enum import Enum
+
+class BaseEnum(Enum):
+    def __new__(cls, value, label, order, type=None, color=None):
+        obj = object.__new__(cls)
+        obj._value_ = value
+        obj.label = label
+        obj.order = order
+        obj.type = type
+        obj.color = color
+        return obj
+
+class ocrResultTypeEnum(BaseEnum):
+    ALL = ("", "全部", 0, None, "#FFF")
+    RIGHT = (1, "正确", 2, "success", "#90e9a6ff")
+    WRONG = (2, "错误", 3, "danger", "#faa7a7ff")
+
+class ocrIsVerifiedEnum(BaseEnum):
+    ALL = (None, "全部", 1)
+    VERIFIED = (True, "已审核", 2)
+    UNVERIFIED = (False, "待审核", 3)
+
+class ocrIsTranslatedEnum(BaseEnum):
+    ALL = (None, "全部", 1)
+    TRANSLATED = (True, "已翻译", 2)
+    UNTRANSLATED = (False, "未翻译", 3)
+
+class ocrIsMatchEnum(BaseEnum):
+    ALL = (None, "全部", 1, "")
+    MATCH = (True, "已匹配", 2)
+    UNMATCH = (False, "未匹配", 3)
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -333,6 +371,7 @@ def process_ocr_task(task_id):
                         "status": 'completed',
                         "end_time": timezone.now(),
                         "total_images": total_images,
+                        "verified_images": task.total_verified,
                         "processed_images": total_images,
                         "remark": f"✅ 任务执行完毕",
                     })
@@ -664,6 +703,7 @@ def process_ocr_task(task_id):
         
         notify_ocr_task_progress({
             "id": task_id,
+            "verified_images": task.total_verified,
             "remark": f"已保存{len(new_results)}条结果到数据库",
         })
         
@@ -1020,4 +1060,241 @@ def _process_results(task, results, target_languages):
         'matched_rate': matched_rate,
     }
 
+@shared_task()
+def binding_translated_image(task_id: str):
+    """
+    OCR 任务再次发起对比处理任务，对比的对象为：
+    a. task_id 生成的 OcrResult 结果
+    b. 用户指定的远程 Git 仓库、分支、路径下的所有文件
+    帮助用户在 OcrResult 的每个记录中标识出是否在远程仓库中存在对应的已翻译的文件。
+    Args:
+        task_id (int): OCR 任务 ID。
+    """
+    logger.info(f"开始处理对比任务: {task_id}")
+
+    def update_trans_repo_status(status, error=""):
+        """更新翻译仓库关联状态"""
+        if task.config and 'trans_repo' in task.config:
+            task.config['trans_repo']['status'] = status
+            task.config['trans_repo']['error'] = error
+            notify_ocr_task_progress({
+                "id": task_id,
+                "config": task.config,
+            })
     
+    try:
+        # step1. 一些预校验
+        task: OCRTask = OCRTask.objects.all_teams().filter(id=task_id).first()
+        if not task:
+            logger.error(f"OCR任务不存在: id={task_id}")
+            return
+
+        task_config = task.config or {}
+        trans_repo = task_config.get('trans_repo')
+        if not trans_repo:
+            msg = f"OCR任务未配置翻译仓库对照参数: id={task_id}"
+            logger.error(msg)
+            return
+
+        try:
+            trans_repo_config = TransRepoConfig(**trans_repo)
+        except Exception as e:
+            msg = f"OCR任务对比仓库配置错误: {str(e)}"
+            logger.error(msg)
+            update_trans_repo_status("failed", msg)
+            return
+
+        results = list(task.related_results) # 转换为列表以便多次使用
+        if len(results) == 0:
+            logger.warning(f"OCR任务无相关结果，跳过对比处理: id={task_id}")
+            update_trans_repo_status("completed")
+            return
+
+        # step2. 将翻译仓库克隆到本地目录
+
+        download_result = trans_repo_config.download_repo()
+        if not download_result.success:
+            msg = f"对比仓库下载失败: {download_result.message}"
+            logger.error(msg)
+            update_trans_repo_status("failed", msg)
+            return
+
+        # step3. 建立索引 (性能优化关键点)
+        try:
+            # 预先扫描目录建立 Hash Set 索引，避免后续循环中频繁 IO
+            trans_repo_config.build_repo_index()
+        except Exception as e:
+            msg = f"建立索引失败: {e}"
+            logger.error(msg)
+            update_trans_repo_status("failed", msg)
+            return
+
+        # step4. 遍历 OCR 结果：利用索引匹配
+        update_results = []
+        match_count = 0
+        
+        for ocr_result in results:
+            # 使用 match_image_path (内存查找) 代替 locate_trans_image_path (磁盘查找)
+            trans_image_path = trans_repo_config.match_image_path(ocr_result.image_path)
+            
+            # 只有状态改变或路径改变时才更新，或者全部更新
+            ocr_result.is_translated = trans_image_path is not None
+            ocr_result.trans_image_path = trans_image_path
+            update_results.append(ocr_result)
+            
+            if ocr_result.is_translated:
+                match_count += 1
+
+        # step5. 批量更新结果
+        if update_results:
+            OCRResult.objects.bulk_update(
+                update_results,
+                fields=['is_translated', 'trans_image_path']
+            )
+        
+        # 更新状态为完成
+        update_trans_repo_status("completed")
+        
+        logger.info(f"对比完成: id={task_id}, 总数={len(results)}, 匹配={match_count}")
+        
+        # 发送完成通知
+
+    except Exception as e:
+        logger.error(f"对比任务执行异常: {str(e)}")
+        logger.error(traceback.format_exc())
+        update_trans_repo_status("failed", str(e))
+
+
+
+@shared_task()
+def export_offline_html_task(task_id: str):
+    """
+    导出离线HTML报告任务
+    """
+    logger.info(f"开始导出离线报告: {task_id}")
+    try:
+        task = OCRTask.objects.all_teams().get(id=task_id)
+        
+        # 序列化数据
+        task_data = OCRTaskSerializer(task).data
+        
+        # 分批处理结果，避免一次性加载过多数据导致内存溢出
+        results_data = []
+        batch_size = 50  # 每批处理的数量
+        total_count = task.related_results.count()
+        
+        logger.info(f"待处理结果总数: {total_count}，批次大小: {batch_size}")
+        
+        # 使用游标分页或切片进行分批处理
+        # 这里使用切片，对于几万条数据是可以接受的
+        for start in range(0, total_count, batch_size):
+            end = min(start + batch_size, total_count)
+            # 获取当前批次的数据
+            batch_results = task.related_results.all().order_by('id')[start:end]
+            batch_data = OCRResultSerializer(batch_results, many=True).data
+            
+            # 处理当前批次的图片转Base64
+            for item in batch_data:
+                # 定义压缩函数
+                def compress_image(path):
+                    if not path: return ""
+                    abs_path = os.path.join(settings.MEDIA_ROOT, path)
+                    if not os.path.exists(abs_path): return ""
+                    
+                    try:
+                        with Image.open(abs_path) as img:
+                            buffer = io.BytesIO()
+                            # 优先尝试 WebP 格式 (体积小且质量好，特别适合带文字的截图)
+                            try:
+                                # 如果是 RGBA 模式，WebP 可以保留透明度；如果是其他模式转 RGB
+                                if img.mode not in ('RGB', 'RGBA'):
+                                    img = img.convert('RGB')
+                                
+                                # quality=75: 视觉无损
+                                # method=4: 默认压缩速度/质量平衡
+                                img.save(buffer, format="WEBP", quality=75, method=4)
+                                mime_type = "image/webp"
+                            except Exception:
+                                # 回退到 JPEG
+                                buffer.seek(0)
+                                buffer.truncate()
+                                if img.mode != 'RGB':
+                                    img = img.convert('RGB')
+                                # quality=75: 保证清晰度
+                                # subsampling=0: 关闭色度抽样，防止文字边缘颜色失真(变红/变糊)
+                                # optimize=True: 优化 Huffman 表，减小体积
+                                img.save(buffer, format="JPEG", quality=75, optimize=True, subsampling=0)
+                                mime_type = "image/jpeg"
+                                
+                            img_str = base64.b64encode(buffer.getvalue()).decode()
+                            return f"data:{mime_type};base64,{img_str}"
+                    except Exception as e:
+                        logger.error(f"图片处理失败 {abs_path}: {e}")
+                        return ""
+
+                # 处理原图
+                item['image_url'] = compress_image(item.get('image_path'))
+                
+                # 处理翻译图
+                item['trans_image_url'] = compress_image(item.get('trans_image_path'))
+            
+            # 将处理好的批次数据添加到总列表中
+            results_data.extend(batch_data)
+            
+            # 打印进度
+            progress = (end / total_count) * 100
+            logger.info(f"导出进度: {end}/{total_count} ({progress:.1f}%)")
+
+        # 辅助函数：将枚举类转换为前端可用字典
+        def enum_to_dict(enum_cls):
+            res = {}
+            for name, member in enum_cls.__members__.items():
+                res[name] = {
+                    'value': member.value,
+                    'label': member.label,
+                    'order': getattr(member, 'order', 0)
+                }
+            return res
+
+        enums_data = {
+            'ocrResultTypeEnum': enum_to_dict(ocrResultTypeEnum),
+            'ocrIsMatchEnum': enum_to_dict(ocrIsMatchEnum),
+            'ocrIsVerifiedEnum': enum_to_dict(ocrIsVerifiedEnum),
+            'ocrIsTranslatedEnum': enum_to_dict(ocrIsTranslatedEnum),
+        }
+
+        # 渲染模板
+        context = {
+            'task': task_data,
+            'task_json': json.dumps(task_data),
+            'results_json': json.dumps(results_data),
+            'enums_json': json.dumps(enums_data)
+        }
+        
+        html_content = render_to_string('ocr/offline_report.html', context)
+        
+        # 保存文件
+        report_dir = PathUtils.get_ocr_reports_dir()
+        os.makedirs(report_dir, exist_ok=True)
+        file_name = f"ocr_report_{task.id}_offline.html"
+        file_path = os.path.join(report_dir, file_name)
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+            
+        logger.info(f"离线报告生成成功: {file_path}")
+        
+        # 发送通知（可选，如果前端通过轮询或SSE接收）
+        notify_ocr_task_progress({
+            "id": task_id,
+            "offline_report_url": f"/media/ocr/reports/{file_name}",
+            "msg": "离线报告生成成功"
+        })
+        
+    except Exception as e:
+        logger.error(f"导出离线报告失败: {e}")
+        logger.error(traceback.format_exc())
+
+
+
+

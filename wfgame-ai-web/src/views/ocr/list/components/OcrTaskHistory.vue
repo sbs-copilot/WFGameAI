@@ -91,7 +91,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="progress" label="执行进度" width="240">
+        <el-table-column prop="progress" label="执行进度" width="180">
           <template #default="{ row }">
             <div>
               <el-progress
@@ -153,7 +153,7 @@
         </el-table-column>
         <el-table-column prop="duration" label="耗时" width="120">
           <template #default="{ row }">
-            {{ row.duration || "-" }}
+            {{ getDurationDisplay(row) }}
           </template>
         </el-table-column>
         <el-table-column
@@ -170,7 +170,37 @@
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="created_at" label="创建信息" width="180">
+        <el-table-column
+          prop="audit_progress"
+          label="审核情况"
+          width="100"
+          align="center"
+        >
+          <template #default="{ row }">
+            <div class="flex flex-col justify-center items-center">
+              <span class="text-xs mb-1">{{
+                `${row.verified_images} / ${row.total_images}`
+              }}</span>
+              <el-progress
+                :percentage="
+                  row.total_images
+                    ? Math.min(
+                        100,
+                        Math.round(
+                          (row.verified_images / row.total_images) * 100
+                        )
+                      )
+                    : 0
+                "
+                :show-text="false"
+                :stroke-width="6"
+                status="success"
+                style="width: 100%"
+              />
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="创建信息" width="150">
           <template #default="{ row }">
             <div class="creation-info">
               <span class="creator">{{ row.creator_name || "未知" }}</span>
@@ -242,7 +272,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from "vue";
+import { ref, reactive, onMounted, onUnmounted } from "vue";
 import {
   Search,
   RefreshLeft,
@@ -265,6 +295,42 @@ import { useSSE, SSEEvent } from "@/layout/components/sseState/useSSE";
 import { debounce } from "@/utils/utils";
 
 const { on } = useSSE();
+
+const currentTime = ref(new Date());
+let timerInterval: number | null = null;
+
+onMounted(() => {
+  timerInterval = window.setInterval(() => {
+    currentTime.value = new Date();
+  }, 1000);
+});
+
+onUnmounted(() => {
+  if (timerInterval) clearInterval(timerInterval);
+});
+
+const formatDuration = (ms: number) => {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+};
+
+const getDurationDisplay = (row: OcrTask) => {
+  if (row.status === taskStatusEnum.PENDING.value) {
+    return "00:00:00";
+  }
+  if (row.status === taskStatusEnum.RUNNING.value) {
+    if (!row.start_time) return "00:00:00";
+    const start = new Date(row.start_time).getTime();
+    const now = currentTime.value.getTime();
+    const diff = Math.max(0, now - start);
+    return formatDuration(diff);
+  }
+  return row.duration || "-";
+};
 
 const updateTask = (updatedTask: OcrTask) => {
   const index = tableData.value.findIndex(task => task.id === updatedTask.id);
@@ -407,7 +473,7 @@ const handleViewResults = (task: OcrTask) => {
 };
 
 const handleDownload = (task: OcrTask) => {
-  downloadTask(task.id);
+  downloadTask(task);
   emit("download", task);
 };
 

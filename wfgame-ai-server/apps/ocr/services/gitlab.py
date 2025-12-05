@@ -1704,6 +1704,62 @@ class GitLabService:
             logger.error(f"从仓库URL提取名称失败: {e}")
             return ""
 
+    def get_repository_directories(
+        self, branch: str = "main", path: str = ""
+    ) -> List[Dict]:
+        """
+        获取指定路径下的所有目录（非递归）
+
+        Args:
+            branch: 分支名
+            path: 路径
+
+        Returns:
+            目录列表 [{"id": "...", "name": "...", "type": "tree", "path": "...", "mode": "..."}]
+        """
+        directories = []
+        page = 1
+
+        try:
+            while True:
+                api_url = self._get_api_url(self.config.project_path, "repository/tree")
+                params = {
+                    "ref": branch,
+                    "path": path,
+                    "recursive": False,  # 不递归，只获取当前层级
+                    "per_page": self.config.per_page,
+                    "page": page,
+                }
+
+                response = self._request_with_retry("GET", api_url, params=params)
+                items = response.json()
+
+                if not items or not isinstance(items, list):
+                    break
+
+                # 筛选目录类型
+                for item in items:
+                    if item.get("type") == "tree":
+                        directories.append(item)
+
+                # 检查是否有下一页
+                total_pages = int(response.headers.get("X-Total-Pages", "0"))
+                if total_pages > 0:
+                    if page >= total_pages:
+                        break
+                else:
+                    # 如果没有 total_pages 头，检查当前页是否满
+                    if len(items) < self.config.per_page:
+                        break
+
+                page += 1
+
+            return directories
+
+        except Exception as e:
+            logger.error(f"获取目录列表失败: {e}")
+            return []
+
 # 便捷函数和工厂方法
 def create_gitlab_service(
     repo_url: str, token: Optional[str] = None, **kwargs

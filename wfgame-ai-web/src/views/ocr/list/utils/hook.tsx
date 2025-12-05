@@ -87,10 +87,25 @@ export const useOcr = () => {
     }
   };
 
+  // [downloadTaskByExportUrl] 通过任务的 export_url 字段下载任务结果
+  const downloadTaskByExportUrl = (task: OcrTask) => {
+    const url = task?.export_url || "";
+    if (!url) {
+      message(`当前任务未找到可下载的统计文件，请联系管理员！`, {
+        type: "warning"
+      });
+      return;
+    }
+    window.open(url, "_blank");
+  };
+
   // [Download] 下载任务结果
-  const downloadTask = async (taskId: string) => {
+  const downloadTask = async (task: OcrTask) => {
     try {
-      const response: any = await ocrTaskApi.download(taskId, { timeout: 60000 });
+      const taskId = task.id;
+      const response: any = await ocrTaskApi.download(taskId, {
+        timeout: 60000
+      });
       // 创建一个下载链接
       const url = window.URL.createObjectURL(new Blob([response.data]));
       const link = document.createElement("a");
@@ -128,6 +143,7 @@ export const useOcr = () => {
     // 任务管理
     fetchTasks,
     deleteTask,
+    downloadTaskByExportUrl,
     downloadTask
   };
 };

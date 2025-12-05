@@ -43,10 +43,12 @@ export interface OcrTask extends CommonFields {
     keyword_filter: any;
     rec_score_thresh: number;
     model_path: string;
+    trans_repo?: any;
   };
   start_time?: string;
   end_time?: string;
   total_images?: number;
+  verified_images?: number;
   matched_images?: number;
   match_rate?: string;
   duration?: string;
@@ -65,12 +67,15 @@ export interface OcrResult extends CommonFields {
   has_match: boolean;
   confidences: number[];
   processing_time: string;
-  result_type: string;
+  result_type: number;
+  is_verified: boolean;
   pic_resolution: string;
   max_confidence?: number;
   corrected_texts?: string[]; // 人工校验后修改的文本
   ground_truth_origin_id?: number; // 对应的真值结果ID
   similarity_score?: number; // 与真值的相似度分数
+  is_translated?: boolean; // 是否已翻译
+  trans_image_path?: string; // 翻译后的图片路径
 }
 
 // OCR 历史任务分页
@@ -105,6 +110,8 @@ export interface TaskGetDetailsParams extends CommonQuery {
   result_type?: string;
   min_confidence?: number;
   max_confidence?: number;
+  is_verified?: boolean | null;
+  is_translated?: boolean | null;
 }
 
 export interface TaskGetDetailResponse {
@@ -114,6 +121,39 @@ export interface TaskGetDetailResponse {
   page: number;
   page_size: number;
   total_pages: number;
+}
+
+// 翻译仓库配置
+export interface RepoMapping {
+  trans_subdir: string;
+  source_subdir: string;
+}
+
+export interface GetSourceDirsParams {
+  task_id: string;
+  path?: string;
+}
+
+export interface GetTransRepoDirsParams {
+  repo_id: string;
+  branch: string;
+  path?: string;
+}
+
+export interface BindTransRepoParams {
+  task_id: string;
+  repo_id: string;
+  branch: string;
+  mapping: RepoMapping[];
+}
+
+export interface TransRepoConfig {
+  url: string;
+  branch: string;
+  access_token: string;
+  target_dir: string;
+  target_path: string;
+  mapping: RepoMapping[];
 }
 
 // OCR 项目相关接口
@@ -223,13 +263,30 @@ export const ocrTaskApi = {
       responseType: "blob"
     };
 
-    return http.request(
-      "post",
-      baseUrlApi("/ocr/history/"),
-      requestConfig,
-      { getResponse: true }
-    );
-  }
+    return http.request("post", baseUrlApi("/ocr/history/"), requestConfig, {
+      getResponse: true
+    });
+  },
+  getSourceDirs: (data: GetSourceDirsParams) =>
+    http.request<ApiResult>("post", baseUrlApi("/ocr/tasks/"), {
+      data: { ...data, action: "get_source_dirs" }
+    }),
+  getTransRepoDirs: (data: GetTransRepoDirsParams) =>
+    http.request<ApiResult>("post", baseUrlApi("/ocr/tasks/"), {
+      data: { ...data, action: "get_trans_repo_dirs" }
+    }),
+  bindTransRepo: (data: BindTransRepoParams) =>
+    http.request<ApiResult>("post", baseUrlApi("/ocr/tasks/"), {
+      data: { ...data, action: "bind_trans_repo" }
+    }),
+  unbindTransRepo: (task_id: string) =>
+    http.request<ApiResult>("post", baseUrlApi("/ocr/tasks/"), {
+      data: { task_id, action: "unbind_trans_repo" }
+    }),
+  exportOfflineHtml: (task_id: string) =>
+    http.request<ApiResult>("post", baseUrlApi("/ocr/tasks/"), {
+      data: { task_id, action: "export_offline_html" }
+    })
 };
 
 // OCR 结果相关接口
@@ -253,11 +310,17 @@ export const ocrResultApi = {
     }),
   // 人工校验图片结果
   verify: (data: {
+    task_id: string;
     id: number;
     result_type: number;
     corrected_texts?: string[];
   }) =>
     http.request<ApiResult>("post", baseUrlApi("/ocr/results/"), {
       data: { ...data, action: "verify" }
+    }),
+  // 批量校验图片结果为正确
+  batchVerifyRight: (data: { task_id: string; ids: number[] }) =>
+    http.request<ApiResult>("post", baseUrlApi("/ocr/results/"), {
+      data: { ...data, action: "batch_verify_right" }
     })
 };

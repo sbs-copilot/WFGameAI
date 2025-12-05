@@ -57,14 +57,18 @@ class OCRResultSerializer(serializers.ModelSerializer):
             "task_id",
             "image_hash",
             "image_path",
+            "is_translated",
+            "trans_image_path",
             "texts",
+            "corrected_texts",
             "languages",
             "has_match",
             "max_confidence",
             "processing_time",
             "created_at",
             "result_type",
-            "pic_resolution"
+            "pic_resolution",
+            "is_verified"
         ]
 
 

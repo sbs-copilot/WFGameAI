@@ -1,33 +1,84 @@
 <template>
-  <el-card
-    shadow="always"
-    class="result-card"
-    :style="{ background: getCardColor(result.result_type) }"
-  >
+  <el-card shadow="always" class="result-card">
     <div class="card-content cursor-pointer">
-      <div class="image-container">
-        <el-image
-          :title="mediaUrl(result.image_path)"
-          style="width: 100%; height: 250px"
-          :src="mediaUrl(result.image_path)"
-          fit="scale-down"
-          lazy
-          @click="handleImageClick(result)"
-        />
+      <div
+        class="image-container"
+        :class="{
+          'flex flex-col': showTransImage
+        }"
+      >
+        <div class="image-wrapper">
+          <el-image
+            :title="mediaUrl(result.image_path)"
+            :style="{
+              width: '100%',
+              height: showTransImage ? '180px' : '180px'
+            }"
+            :src="mediaUrl(result.image_path)"
+            fit="scale-down"
+            lazy
+            @click="handleImageClick(result, 'original')"
+          />
+          <div v-if="showTransImage" class="image-label original">原图</div>
+        </div>
+        <div v-if="showTransImage" class="image-wrapper">
+          <el-image
+            :title="
+              result.trans_image_path
+                ? mediaUrl(result.trans_image_path)
+                : '无翻译图'
+            "
+            style="width: 100%; height: 180px"
+            :src="
+              result.trans_image_path ? mediaUrl(result.trans_image_path) : ''
+            "
+            fit="scale-down"
+            lazy
+            @click="handleImageClick(result, 'translated')"
+          >
+            <template #error>
+              <div
+                class="flex flex-col items-center justify-center h-full text-gray-300 w-full"
+                style="height: 180px"
+              >
+                <el-icon size="50"><Picture /></el-icon>
+                <span class="mt-4 text-sm">无翻译图</span>
+              </div>
+            </template>
+          </el-image>
+          <div class="image-label translated">翻译</div>
+        </div>
       </div>
       <div class="info-container">
         <h3 class="image-name" :title="getImgName(result.image_path)">
           {{ getImgName(result.image_path) }}
         </h3>
-
         <p class="info-item">
-          <span :title="`ID:${result.id}`">识别结果:</span>
+          <span :title="`ID:${result.id}`">机器识别:</span>
           <span
-            class="text-primary"
             :title="getResultText(result)"
             @click="handleCopyText(getResultText(result))"
+            :class="{
+              'text-primary font-semibold':
+                result.result_type == ocrResultTypeEnum.RIGHT.value,
+              'line-through text-red-300':
+                result.result_type == ocrResultTypeEnum.WRONG.value
+            }"
           >
             {{ getResultText(result) || "-" }}
+          </span>
+        </p>
+        <p
+          v-if="result.result_type == ocrResultTypeEnum.WRONG.value"
+          class="info-item"
+        >
+          <span>人工矫正:</span>
+          <span
+            class="text-primary font-semibold"
+            :title="getResultCorrectedText(result)"
+            @click="handleCopyText(getResultCorrectedText(result))"
+          >
+            {{ getResultCorrectedText(result) || "（空）" }}
           </span>
         </p>
         <p class="info-item">
@@ -81,6 +132,11 @@
             {{ item.label }}
           </el-radio-button>
         </el-radio-group>
+        <VerifiedSVG
+          v-if="result.is_verified"
+          class="is_verified"
+          title="已人工审核"
+        />
       </div>
     </div>
   </el-card>
@@ -93,30 +149,33 @@ import { ref, computed } from "vue";
 import { superRequest } from "@/utils/request";
 import { mediaUrl } from "@/api/utils";
 import { copyText } from "@/utils/utils";
-import { ElMessageBox } from "element-plus";
+import { Picture } from "@element-plus/icons-vue";
+
+import VerifiedSVG from "@/assets/svg/verified.svg?component";
 
 type Emits = {
-  (e: "view-image", result: OcrResult): void;
-  (e: "update:result_type", value: string): void;
+  (e: "view-image", result: OcrResult, type: string): void;
+  (e: "update:result", updates: Partial<OcrResult>): void;
+  (e: "request-correction", result: OcrResult, targetType: number): void;
 };
 
 const emit = defineEmits<Emits>();
 
 const props = defineProps<{
   result: OcrResult;
+  taskId: string;
+  showTranslation?: boolean;
 }>();
+
+const showTransImage = computed(() => {
+  return props.showTranslation && props.result.is_translated;
+});
 
 const currentResultType = ref(props.result.result_type);
 
 const resultTypes = computed(() => {
   return Object.values(ocrResultTypeEnum).filter(item => item.value > 0);
 });
-
-const getCardColor = (_resultType: string) => {
-  // const entry = getEnumEntry(ocrResultTypeEnum, resultType);
-  // return entry ? entry.color : "#F2F2F2";
-  return "#FFFFFF";
-};
 
 const getResultText = (result: OcrResult) => {
   if (!result.texts) return "";
@@ -127,13 +186,22 @@ const getResultText = (result: OcrResult) => {
   return result.texts;
 };
 
+const getResultCorrectedText = (result: OcrResult) => {
+  if (!result.corrected_texts) return "";
+  if (Array.isArray(result.corrected_texts)) {
+    const texts = result.corrected_texts.map(s => s).join("");
+    return texts;
+  }
+  return result.corrected_texts;
+};
+
 const handleCopyText = (text: string) => {
   if (!text) return;
   copyText(text);
 };
 
-const handleImageClick = (result: OcrResult) => {
-  emit("view-image", result);
+const handleImageClick = (result: OcrResult, type = "original") => {
+  emit("view-image", result, type);
 };
 
 const getImgName = (imagePath: string) => {
@@ -142,51 +210,25 @@ const getImgName = (imagePath: string) => {
   return parts[parts.length - 1];
 };
 
-const handleResultTypeChange = async (newType: string) => {
-  const oldType = currentResultType.value;
-  if (newType === oldType) return;
+const submitUpdate = (newType: number) => {
+  const oldValues = {
+    result_type: currentResultType.value,
+    is_verified: props.result.is_verified
+  };
 
-  let correctedTexts: string[] | undefined;
-
-  // 当更新为非正确时，必须传递 corrected_texts
-  if (
-    newType == ocrResultTypeEnum.WRONG.value ||
-    newType == ocrResultTypeEnum.MISSING.value
-  ) {
-    try {
-      const { value } = await ElMessageBox.prompt(
-        "请输入你看到的图片中正确的文本",
-        "🧐人工矫正",
-        {
-          confirmButtonText: "确定",
-          cancelButtonText: "取消",
-          inputValue: getResultText(props.result),
-          inputType: "textarea",
-          inputValidator: val => {
-            if (val === getResultText(props.result)) {
-              return "当前输入的文本与识别结果相同";
-            }
-            return true;
-          }
-        }
-      );
-      correctedTexts = [value];
-    } catch {
-      return;
-    }
-  }
+  const updates: Partial<OcrResult> = {
+    result_type: newType,
+    is_verified: true
+  };
 
   // 先发送 emit 事件给父组件
-  emit("update:result_type", newType);
+  emit("update:result", updates);
 
   const params: any = {
     id: props.result.id,
+    task_id: props.taskId,
     result_type: newType
   };
-
-  if (correctedTexts) {
-    params.corrected_texts = correctedTexts;
-  }
 
   // 然后调用 API 更新
   superRequest({
@@ -197,9 +239,23 @@ const handleResultTypeChange = async (newType: string) => {
     },
     onFailed: () => {
       // API 调用失败时，发送原来的值给父组件（回滚）
-      emit("update:result_type", oldType);
+      emit("update:result", oldValues);
     }
   });
+};
+
+const handleResultTypeChange = async (newType: number) => {
+  const oldType = props.result.result_type;
+  if (newType === oldType) return;
+
+  // 当更新为非正确时，必须传递 corrected_texts，请求父组件打开矫正弹窗
+  if (newType == ocrResultTypeEnum.WRONG.value) {
+    emit("request-correction", props.result, newType);
+    return;
+  }
+
+  // 正确类型，直接提交更新
+  submitUpdate(newType);
 };
 </script>
 
@@ -222,6 +278,36 @@ const handleResultTypeChange = async (newType: string) => {
   height: 100%;
 }
 
+.image-wrapper {
+  position: relative;
+  height: 100%;
+}
+
+.image-label {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 4px 8px;
+  border-radius: 4px;
+  z-index: 1;
+  backdrop-filter: blur(4px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  font-weight: 500;
+  transition: all 0.3s ease;
+
+  &.original {
+    background-color: rgba(255, 255, 255, 0.85);
+    color: #606266;
+  }
+
+  &.translated {
+    background-color: rgba(236, 245, 255, 0.9);
+    color: #81c0ff;
+  }
+}
+
 .image-container {
   flex-shrink: 0;
   padding: 6px;
@@ -234,6 +320,18 @@ const handleResultTypeChange = async (newType: string) => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+  z-index: 0;
+
+  .is_verified {
+    position: absolute;
+    top: 46px;
+    right: 4px;
+    width: 80px;
+    height: 80px;
+    opacity: 0.2;
+    z-index: -1;
+  }
 }
 
 .image-name {

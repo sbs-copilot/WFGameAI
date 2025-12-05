@@ -180,11 +180,22 @@ class OCRInstancePool:
             use_fast_models: 是否使用快速模型
         """
 
-        # 强制GPU环境配置
-        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-        os.environ["FLAGS_use_gpu"] = "true"
-        os.environ["FLAGS_fraction_of_gpu_memory_to_use"] = "0.8"
+        # 强制GPU环境配置 (仅在启用GPU时设置)
+        if GPU_ENABLED:
+            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            os.environ["FLAGS_use_gpu"] = "true"
+            os.environ["FLAGS_fraction_of_gpu_memory_to_use"] = "0.8"
+        else:
+            # 显式禁用GPU，防止环境变量残留影响
+            os.environ["FLAGS_use_gpu"] = "false"
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            # 关键：防止 CPU 模式下 OpenMP 线程冲突导致死锁
+            os.environ["OMP_NUM_THREADS"] = "1" 
+            os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+            # 新增：禁用 MKLDNN，防止在某些 CPU 环境下死锁
+            os.environ["FLAGS_use_mkldnn"] = "false" 
+            os.environ["FLAGS_enable_mkldnn"] = "false"
 
         # 获取阶段参数配置
         stage_params = PARAM_VERSIONS.get(stage, PARAM_VERSIONS["baseline"])
@@ -225,16 +236,26 @@ class OCRInstancePool:
                 "text_recognition_model_name": init_kwargs.get('text_recognition_model_name'),
             }
             
-            # 尝试启用HPI高性能推理
-            try:
-                pipeline_config["use_hpip"] = True
-                ocr_instance = create_pipeline("OCR", **pipeline_config)
-                logger.info(f"✅ HPI高性能推理已启用: {stage}_{lang}")
-            except Exception as hpi_error:
-                logger.warning(f"⚠️  HPI不可用，使用标准推理: {hpi_error}")
+            logger.info(f"正在创建PaddleX Pipeline (Device={device_name})...")
+            
+            # 仅在 GPU 模式下尝试 HPI，CPU 模式直接禁用
+            if GPU_ENABLED:
+                try:
+                    pipeline_config["use_hpip"] = True
+                    logger.info("尝试启用 HPI 高性能推理...")
+                    ocr_instance = create_pipeline("OCR", **pipeline_config)
+                    logger.info(f"✅ HPI高性能推理已启用: {stage}_{lang}")
+                except Exception as hpi_error:
+                    logger.warning(f"⚠️  HPI不可用，回退到标准推理: {hpi_error}")
+                    pipeline_config["use_hpip"] = False
+                    ocr_instance = create_pipeline("OCR", **pipeline_config)
+            else:
+                # CPU 模式直接使用标准推理
                 pipeline_config["use_hpip"] = False
+                logger.info("CPU模式: 使用标准推理创建 Pipeline...")
                 ocr_instance = create_pipeline("OCR", **pipeline_config)
-            logger.info(f"成功创建PaddleX OCR实例: {stage}_{lang}_{det_model.split('_')[-2]}")
+
+            logger.info(f"✅ 成功创建PaddleX OCR实例: {stage}_{lang}_{det_model.split('_')[-2]}")
             return ocr_instance
         except Exception as e:
             # 不再回退到PaddleOCR，直接抛出异常终止

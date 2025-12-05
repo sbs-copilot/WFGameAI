@@ -69,13 +69,6 @@ export const ocrSourceTypeEnum: Record<string, EnumValue> = {
 /** OCR 识别结果类型 */
 export const ocrResultTypeEnum: Record<string, EnumValue> = {
   ALL: { label: "全部", value: "", order: 0, color: "#FFF" },
-  UNCHECK: {
-    label: "待校验",
-    value: 0,
-    order: 1,
-    type: "info",
-    color: "#d3d3d3ff"
-  },
   RIGHT: {
     label: "正确",
     value: 1,
@@ -84,24 +77,54 @@ export const ocrResultTypeEnum: Record<string, EnumValue> = {
     color: "#90e9a6ff"
   }, // 更深的浅绿色
   WRONG: {
-    label: "误检",
+    label: "错误",
     value: 2,
     order: 3,
     type: "danger",
     color: "#faa7a7ff"
-  }, // 更深的浅红色
-  MISSING: {
-    label: "漏检",
-    value: 3,
-    order: 4,
-    type: "warning",
-    color: "#ddbc04ff"
-  } // 更深的浅黄色
+  } // 更深的浅红色
+  // MISSING: {
+  //   label: "漏检",
+  //   value: 3,
+  //   order: 4,
+  //   type: "warning",
+  //   color: "#ddbc04ff"
+  // } // 更深的浅黄色
+};
+
+/** OCR 识别结果是否审核 */
+export const ocrIsVerifiedEnum: Record<string, EnumValue> = {
+  ALL: { label: "全部", value: null, order: 1 },
+  VERIFIED: {
+    label: "已审核",
+    value: true,
+    order: 2
+  },
+  UNVERIFIED: {
+    label: "待审核",
+    value: false,
+    order: 3
+  }
+};
+
+/** OCR 识别结果是否有翻译资源 */
+export const ocrIsTranslatedEnum: Record<string, EnumValue> = {
+  ALL: { label: "全部", value: null, order: 1 },
+  TRANSLATED: {
+    label: "已翻译",
+    value: true,
+    order: 2
+  },
+  UNTRANSLATED: {
+    label: "未翻译",
+    value: false,
+    order: 3
+  }
 };
 
 /** OCR是否匹配 */
 export const ocrIsMatchEnum: Record<string, EnumValue> = {
-  ALL: { label: "全部", value: null, order: 1, type: "" },
+  ALL: { label: "全部", value: null, order: 1, type: "info" },
   MATCH: {
     label: "已匹配",
     value: true,

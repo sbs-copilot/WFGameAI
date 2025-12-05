@@ -1,6 +1,7 @@
 """
 OCR模块数据模型
 """
+import difflib
 
 from django.db import models
 from django.db.models import Q
@@ -9,6 +10,7 @@ import datetime
 from django.db.models import QuerySet
 
 from apps.core.models.common import CommonFieldsMixin
+from django.db import transaction
 
 
 def generate_task_id():
@@ -80,6 +82,7 @@ class OCRTask(CommonFieldsMixin):
         on_delete=models.CASCADE,
         related_name="tasks",
         verbose_name="所属项目",
+        null=True
     )
     source_type = models.CharField(
         max_length=10, choices=SOURCE_CHOICES, verbose_name="来源类型"
@@ -104,6 +107,7 @@ class OCRTask(CommonFieldsMixin):
     start_time = models.DateTimeField(null=True, blank=True, verbose_name="开始时间")
     end_time = models.DateTimeField(null=True, blank=True, verbose_name="结束时间")
     total_images = models.IntegerField(default=0, verbose_name="总图片数")
+    verified_images = models.IntegerField(default=0, verbose_name="已校验图片数")
     processed_images = models.IntegerField(default=0, verbose_name="已处理图片数")
     matched_images = models.IntegerField(default=0, verbose_name="匹配图片数")
     match_rate = models.DecimalField(
@@ -127,8 +131,17 @@ class OCRTask(CommonFieldsMixin):
         if has_cache:
             cached_result_ids = [int(i) for i in has_cache.result_ids.split(',')]
             query = query | Q(id__in=cached_result_ids)
-        return OCRResult.objects.filter(query).order_by("id")
+        return OCRResult.objects.all_teams().filter(query).order_by("id")
 
+    @property
+    def total_verified(self) -> int:
+        """获取已校验图片数"""
+        return self.related_results.filter(is_verified=True).count()
+
+    def update_verified_count(self):
+        """更新已校验图片数"""
+        self.verified_images = self.total_verified
+        self.save(update_fields=["verified_images"])
 
     def calculate_match_rate_by_related_results(self):
         """通过 related_results 计算匹配率"""
@@ -232,10 +245,8 @@ class OCRTask(CommonFieldsMixin):
 class OCRResult(CommonFieldsMixin):
     """OCR结果模型"""
     TYPE_CHOICES = (
-        (0, "待确认"),  # 默认状态，表示机器刚跑完，等待人工确认
-        (1, "正确"),    # 人工确认：完全正确
-        (2, "误检"),    # 人工确认：识别错误或不该识别
-        (3, "漏检"),    # 人工确认：应该识别但没识别到
+        (1, "正确"),    # 完全正确
+        (2, "错误"),    # 合并错误类型
     )
 
     task = models.ForeignKey(
@@ -243,9 +254,12 @@ class OCRResult(CommonFieldsMixin):
         on_delete=models.CASCADE,
         related_name="results",
         verbose_name="所属任务",
+        null=True,
     )
     image_hash = models.CharField(max_length=128, default="", verbose_name="图片哈希值")
     image_path = models.CharField(max_length=255, verbose_name="图片路径")
+    is_translated = models.BooleanField(default=False, null=True, verbose_name="是否已翻译")
+    trans_image_path = models.CharField(max_length=255, blank=True, null=True, verbose_name="翻译后图片路径")
     texts = models.JSONField(verbose_name="识别文本")
     languages = models.JSONField(null=True, blank=True, verbose_name="识别语言")
     has_match = models.BooleanField(default=False, verbose_name="是否匹配")
@@ -257,8 +271,9 @@ class OCRResult(CommonFieldsMixin):
         max_digits=10, decimal_places=3, null=True, blank=True, verbose_name="处理时间"
     )
     result_type = models.IntegerField(
-        choices=TYPE_CHOICES, default=0, verbose_name="识别结果类型"
+        choices=TYPE_CHOICES, default=1, verbose_name="识别结果类型"
     )
+    is_verified = models.BooleanField(default=False, verbose_name="是否人工校验")
     pic_resolution = models.CharField(max_length=50, blank=True, null=True, verbose_name="图片分辨率")
     # 人工矫正的文本内容
     corrected_texts = models.JSONField(null=True, blank=True, verbose_name="人工矫正文本", default=list)
@@ -268,14 +283,154 @@ class OCRResult(CommonFieldsMixin):
     similarity_score = models.DecimalField(
         max_digits=5, decimal_places=4, default=0.0, verbose_name="真值相似度"
     )
+    corrected_origin_id = models.BigIntegerField(null=True, db_index=True, blank=True, verbose_name="人工矫正来源ID")
 
     def __str__(self):
-        return f"{self.task.id}_{self.id}"
+        task_id = self.task.id if self.task else "None"
+        return f"{task_id}_{self.id}"
 
     class Meta:
         verbose_name = "OCR结果"
         verbose_name_plural = "OCR结果"
         db_table = "ocr_result"
+
+
+    def verify(self, task_id:str, result_type: int, corrected_texts: list = None):
+        """
+        人工校验本次结果（代理到 batch_verify）
+        """
+        self.batch_verify(
+            task_id,
+            [{
+            'id': self.id,
+            'result_type': result_type,
+            'corrected_texts': corrected_texts
+        }])
+
+    @classmethod
+    def batch_verify(cls, task_id:str, verify_data_list: list):
+        """
+        批量校验方法，优化数据库操作性能
+        由于缓存设计的存在，批量操作的 OcrResult 不一定全属于同一个任务，而有可能是历史 OcrResult
+        所以需要传递当前操作的 task_id 参数，以更新当前任务的已校验数量
+        :param task_id: str, OCR任务ID
+        :param verify_data_list: list[dict], 每一项包含 {'id': int, 'result_type': int, 'corrected_texts': list}
+        """
+        if not verify_data_list:
+            return
+
+        # 提取 ID 和数据映射
+        # 过滤掉没有 id 的无效数据
+        data_map = {str(item['id']): item for item in verify_data_list if 'id' in item}
+        ids = list(data_map.keys())
+
+        if not ids:
+            return
+
+        # 1. 批量获取当前结果对象
+        # 注意：id 是字符串还是数字取决于模型定义，这里假设模型定义兼容
+        current_results = cls.objects.in_bulk(ids)
+
+        # 2. 预取可能存在的真值副本 (corrected_origin_id 在这批 ID 中)
+        existing_copies = cls.objects.filter(corrected_origin_id__in=ids)
+        existing_copies_map = {str(copy.corrected_origin_id): copy for copy in existing_copies}
+
+        results_to_update = []
+        copies_to_update = []
+        copies_to_create = []
+
+        # 用于后续更新 Cache 的映射: image_hash -> ground_truth_result_id
+        cache_update_map = {}
+
+        # 临时存储需要创建副本的 origin_id，用于后续反查 ID
+        origins_needing_copy = []
+
+        with transaction.atomic():
+            for original_id, result in current_results.items():
+
+                # original_id 在 in_bulk 返回字典中通常是主键类型
+                str_id = str(original_id)
+                if str_id not in data_map:
+                    continue
+
+                data = data_map[str_id]
+                result_type = data.get('result_type')
+                corrected_texts = data.get('corrected_texts', [])
+                if corrected_texts is None:
+                    corrected_texts = []
+
+                # 更新原始记录
+                result.is_verified = True
+                result.result_type = result_type
+
+                if result_type == 1:
+                    # 正确
+                    result.corrected_texts = []
+                    cache_update_map[result.image_hash] = result.id
+                    result.has_match = any(result.texts or [])
+                else:
+                    # 误检/漏检
+                    result.corrected_texts = corrected_texts
+                    result.has_match = any(result.corrected_texts or [])
+
+                    # 处理副本
+                    if str_id in existing_copies_map:
+                        # 更新现有副本
+                        copy = existing_copies_map[str_id]
+                        copy.texts = corrected_texts
+                        copy.result_type = 1
+                        copy.is_verified = True
+                        copy.corrected_texts = []
+                        copy.has_match = True
+                        copies_to_update.append(copy)
+                        cache_update_map[result.image_hash] = copy.id
+                    else:
+                        # 准备创建新副本
+                        # 复制必要字段
+                        new_copy = cls(
+                            texts=corrected_texts,
+                            result_type=1,
+                            is_verified=True,
+                            corrected_texts=[],
+                            has_match=True,
+                            task=None,
+                            corrected_origin_id=result.id,
+                            image_hash=result.image_hash,
+                            image_path=result.image_path,
+                            pic_resolution=result.pic_resolution,
+                            languages=result.languages,
+                            max_confidence=1.0, # 人工修正默认为最高置信度
+                            confidences=[],
+                            processing_time=0,
+                        )
+                        copies_to_create.append(new_copy)
+                        origins_needing_copy.append(result.id)
+
+                results_to_update.append(result)
+
+            # 3. 执行批量更新/插入
+            if results_to_update:
+                cls.objects.bulk_update(results_to_update, ['is_verified', 'result_type', 'corrected_texts', 'has_match'])
+
+            if copies_to_update:
+                cls.objects.bulk_update(copies_to_update, ['texts', 'is_verified', 'result_type', 'corrected_texts', 'has_match'])
+
+            if copies_to_create:
+                cls.objects.bulk_create(copies_to_create)
+
+                # 4. 反查新创建的副本 ID 以更新 Cache
+                new_copies = cls.objects.filter(corrected_origin_id__in=origins_needing_copy)
+                for copy in new_copies:
+                    cache_update_map[copy.image_hash] = copy.id
+
+            # 5. 批量更新 Cache
+            if cache_update_map:
+                OCRCache.batch_set_ground_truth(cache_update_map)
+
+        # 6. 更新任务的已校验数量
+        task = OCRTask.objects.filter(id=task_id).first()
+        if task:
+            task.update_verified_count()
 
 class OCRCache(models.Model):
     """
@@ -344,15 +499,47 @@ class OCRCache(models.Model):
     def set_ground_truth(image_hash: str, result_id: int):
         """
         人工校验接口：将某个结果标记为真值
-        当用户在前端修改文本、或点击'确认'、'误检'、'漏检'时调用此方法。
+        (内部调用 batch_set_ground_truth 实现)
         """
-        OCRCache.objects.update_or_create(
-            image_hash=image_hash,
-            defaults={
-                "result_id": result_id,
-                "is_verified": True,
-            }
-        )
+        OCRCache.batch_set_ground_truth({image_hash: result_id})
+
+    @staticmethod
+    def batch_set_ground_truth(hash_id_map: dict):
+        """
+        批量设置真值
+        :param hash_id_map: {image_hash: result_id}
+        """
+        if not hash_id_map:
+            return
+
+        hashes = list(hash_id_map.keys())
+        existing_caches = OCRCache.objects.filter(image_hash__in=hashes)
+        existing_map = {c.image_hash: c for c in existing_caches}
+
+        to_update = []
+        to_create = []
+
+        for img_hash, res_id in hash_id_map.items():
+            if not img_hash or not res_id:
+                continue
+            if img_hash in existing_map:
+                cache = existing_map[img_hash]
+                # 仅当结果ID变化或未校验时才更新
+                if cache.result_id != res_id or not cache.is_verified:
+                    cache.result_id = res_id
+                    cache.is_verified = True
+                    to_update.append(cache)
+            else:
+                to_create.append(OCRCache(
+                    image_hash=img_hash,
+                    result_id=res_id,
+                    is_verified=True
+                ))
+
+        if to_update:
+            OCRCache.objects.bulk_update(to_update, ['result_id', 'is_verified'])
+        if to_create:
+            OCRCache.objects.bulk_create(to_create, ignore_conflicts=True)
 
 
 class OCRCacheHit(models.Model):
