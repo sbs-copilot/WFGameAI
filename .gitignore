@@ -21,7 +21,7 @@ docs/
 *.mdc
 *.csv
 *.xlsx
-
+*.json
 
 run/*
 media/
@@ -54,17 +54,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Django stuff
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
 # 提高 Git 缓冲区 (500MB)
 # 如果遇到缓冲区不足问题，请运行:
 # git config --global http.postBuffer 524288000
-.vscode/PythonImportHelper-v2-Completion.json
-ai_capture_and_analyze_result/*.json
-ai_capture_and_analyze_result/*.png
+
 
 # Python cache
 __pycache__/
@@ -73,7 +66,6 @@ __pycache__/
 *.pyd
 output/ocr/results/predict/
 
-# wfgame-ai-server/node_modules
 wfgame-ai-server/node_modules/*
 
 # configs

@@ -257,11 +257,40 @@ def _device_worker_with_account(device_serial: str, scripts: List[dict],
             except Exception:
                 pass
 
-        # 为设备准备日志与报告目录，并实例化 ActionProcessor
+        # 先创建replay_root目录，再初始化ActionProcessor
+        # 统一的 StepTracker（跨脚本保留历史）
+        shared_tracker = None
+        replay_root = None
+        device_report_dir = None
+        if task_id is not None:
+            try:
+                # 期望目录: ${server_dir}/apps/reports/tmp/replay/task_<id>/<device_serial>_<ts>
+                server_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+                from datetime import datetime as _dt
+                _run_ts = _dt.now().strftime('%Y%m%d_%H%M%S')
+                replay_root = os.path.join(server_dir, 'apps', 'reports', 'tmp', 'replay', f'task_{int(task_id)}', f"{device_serial}_{_run_ts}")
+                os.makedirs(replay_root, exist_ok=True)
+                device_report_dir = replay_root
+                from replay_script import StepTracker
+                shared_tracker = StepTracker(task_id=int(task_id), device_serial=device_serial, device_report_dir=replay_root)
+                # 对齐 StepTracker 的远端对象目录，确保与本地目录同名（含时间戳）
+                try:
+                    shared_tracker._run_dir_name = f"{device_serial}_{_run_ts}"
+                    _task_part = f"task_{shared_tracker.task_id}" if getattr(shared_tracker, 'task_id', None) else "session"
+                    shared_tracker._object_root = f"replay_tasks/{_task_part}/{shared_tracker._run_dir_name}".replace('//','/')
+                    _scheme = getattr(shared_tracker, '_scheme', 'http')
+                    _host = getattr(shared_tracker, '_host', 'localhost')
+                    _bucket = getattr(shared_tracker, '_bucket', 'wfgame-ai')
+                    shared_tracker._url_base = f"{_scheme}://{_host}/{_bucket}/{shared_tracker._object_root}/"
+                except Exception:
+                    pass
+            except Exception as _st_e:
+                print(f"[Worker-{process_id}][{timestamp}] 设备 {device_serial} 初始化共享 StepTracker 失败: {_st_e}")
+
+        # 为设备准备日志路径，并实例化 ActionProcessor
         log_txt_path = None
         try:
             if replay_root:
-                os.makedirs(replay_root, exist_ok=True)
                 log_txt_path = os.path.join(replay_root, 'log.txt')
                 # 确保存在空的 log.txt
                 with open(log_txt_path, 'a', encoding='utf-8') as _f:
@@ -281,36 +310,6 @@ def _device_worker_with_account(device_serial: str, scripts: List[dict],
         # 设置账号信息
         if account and hasattr(action_processor, 'set_device_account'):
             action_processor.set_device_account(account)
-
-        # 正式遍历脚本列表并执行
-        # 统一的 StepTracker（跨脚本保留历史）
-        shared_tracker = None
-        replay_root = None
-        if task_id is not None:
-            try:
-                # 期望目录: ${server_dir}/apps/reports/tmp/replay/task_<id>/<device_serial>_<ts>
-                server_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-                from datetime import datetime as _dt
-                _run_ts = _dt.now().strftime('%Y%m%d_%H%M%S')
-                replay_root = os.path.join(server_dir, 'apps', 'reports', 'tmp', 'replay', f'task_{int(task_id)}', f"{device_serial}_{_run_ts}")
-                os.makedirs(replay_root, exist_ok=True)
-                from replay_script import StepTracker
-                shared_tracker = StepTracker(task_id=int(task_id), device_serial=device_serial, device_report_dir=replay_root)
-                # 对齐 StepTracker 的远端对象目录，确保与本地目录同名（含时间戳）
-                try:
-                    shared_tracker._run_dir_name = f"{device_serial}_{_run_ts}"
-                    _task_part = f"task_{shared_tracker.task_id}" if getattr(shared_tracker, 'task_id', None) else "session"
-                    shared_tracker._object_root = f"replay_tasks/{_task_part}/{shared_tracker._run_dir_name}".replace('//','/')
-                    _scheme = getattr(shared_tracker, '_scheme', 'http')
-                    _host = getattr(shared_tracker, '_host', 'localhost')
-                    _bucket = getattr(shared_tracker, '_bucket', 'wfgame-ai')
-                    shared_tracker._url_base = f"{_scheme}://{_host}/{_bucket}/{shared_tracker._object_root}/"
-                except Exception:
-                    pass
-                # 用于返回值的设备报告目录与动作处理保存
-                device_report_dir = replay_root
-            except Exception as _st_e:
-                print(f"[Worker-{process_id}][{timestamp}] 设备 {device_serial} 初始化共享 StepTracker 失败: {_st_e}")
 
         for idx_script, script_config in enumerate(scripts):
             # 1) DB脚本: dict 且包含 script_id
@@ -339,25 +338,6 @@ def _device_worker_with_account(device_serial: str, scripts: List[dict],
             if not script_path:
                 # 无法识别的脚本配置，跳过
                 continue
-
-                try:
-                    base = os.path.basename(script_path)
-                    print(f"[Worker-{process_id}][{timestamp}] 设备 {device_serial} 执行脚本: {base}")
-                    result = action_processor.process_script(script_path)
-                    success = bool(getattr(result, 'success', result))
-                    total_success += 1 if success else 0
-                    total_failed += 0 if success else 1
-                    executed_scripts.append({
-                        'script': base,
-                        'success': 1 if success else 0,
-                        'failed': 0 if success else 1
-                    })
-                    print(f"[Worker-{process_id}][{timestamp}] 设备 {device_serial} 脚本 {base} {'成功' if success else '失败'}")
-                except Exception as e:
-                    total_failed += 1
-                    print(f"[Worker-{process_id}][{timestamp}] 设备 {device_serial} 脚本执行异常: {e}")
-                # 非 DB 脚本暂不进入 StepTracker 聚合
-
         # 准备返回结果
         final_result = {
             'success': total_failed == 0,

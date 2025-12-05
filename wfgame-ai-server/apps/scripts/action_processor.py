@@ -24,42 +24,7 @@ import numpy as np
 import base64
 import io
 from collections import namedtuple
-# 尝试导入相关模块，如果失败则使用占位符
-try:
-    from .enhanced_input_handler import DeviceScriptReplayer
-except (ImportError, AttributeError):
-    try:
-        from enhanced_input_handler import DeviceScriptReplayer
-    except (ImportError, AttributeError):
-        print("⚠️ 警告: 无法导入DeviceScriptReplayer，部分功能可能不可用")
-        DeviceScriptReplayer = None
-
-try:
-    from .app_lifecycle_manager import AppLifecycleManager
-except ImportError:
-    try:
-        from app_lifecycle_manager import AppLifecycleManager
-    except ImportError:
-        print("⚠️ 警告: 无法导入app_lifecycle_manager，部分功能可能不可用")
-        AppLifecycleManager = None
-
-try:
-    from .app_permission_manager import integrate_with_app_launch
-except ImportError:
-    try:
-        from app_permission_manager import integrate_with_app_launch
-    except ImportError:
-        print("⚠️ 警告: 无法导入app_permission_manager，部分功能可能不可用")
-        integrate_with_app_launch = None
-
-try:
-    from .enhanced_device_preparation_manager import EnhancedDevicePreparationManager
-except ImportError:
-    try:
-        from enhanced_device_preparation_manager import EnhancedDevicePreparationManager
-    except ImportError:
-        print("⚠️ 警告: 无法导入enhanced_device_preparation_manager，部分功能可能不可用")
-        EnhancedDevicePreparationManager = None
+from app_lifecycle_manager import AppLifecycleManager
 
 # Import try_log_screen function for thumbnail generation
 try:
@@ -1124,79 +1089,123 @@ class ActionProcessor:
 
     def _handle_device_preparation(self, step, step_idx):
         """处理设备预处理步骤"""
-        params = step.get("params", {})
-        step_remark = step.get("remark", "")
+        # 检查是否已经执行过预处理（避免重复执行）
+        if hasattr(self, '_device_preparation_executed') and self._device_preparation_executed:
+            print("⏭️ 设备预处理已执行过，跳过重复执行")
+            return ActionResult(
+                success=True,
+                message="设备预处理已执行（跳过）",
+                details={"operation": "device_preparation", "skipped": True}
+            )
+        
+        config = {
+            "check_usb": step.get("check_usb",True),
+            "setup_wireless": step.get("setup_wireless",False),
+            "auto_handle_dialog": step.get("auto_handle_dialog",True),
+            "handle_screen_lock": step.get("handle_screen_lock",True),
+            "setup_input_method": step.get("setup_input_method",True),
+            "save_logs": step.get("save_logs",False),
+            "remark":step.get("remark")
+        }
 
-        # 设备预处理参数
-        check_usb = params.get("check_usb", True)
-        setup_wireless = params.get("setup_wireless", True)
-        auto_handle_dialog = params.get("auto_handle_dialog", True)
-        handle_screen_lock = params.get("handle_screen_lock", True)
-        setup_input_method = params.get("setup_input_method", True)
-        save_logs = params.get("save_logs", True)
+        print(f"🔧 开始设备预处理: {config['remark']}")
+        print(
+            "📋 预处理参数: USB检查={}, 无线设置={}, 弹窗处理={},屏幕锁定={}, 输入法设置={}, 保存日志={}".format(
+                config["check_usb"],
+                config["setup_wireless"],
+                config["auto_handle_dialog"],
+                config["handle_screen_lock"],
+                config["setup_input_method"],
+                config["save_logs"]
+            )
+        )
 
-        print(f"🔧 开始设备预处理: {step_remark}")
-        print(f"📋 预处理参数: USB检查={check_usb}, 无线设置={setup_wireless}, 弹窗处理={auto_handle_dialog}")
-        print(f"屏幕锁定={handle_screen_lock}, 输入法设置={setup_input_method}, 保存日志={save_logs}")
-
+        # 初始化success变量，默认为True
         success = True
 
         try:
-            device_manager = EnhancedDevicePreparationManager(save_logs=save_logs) if EnhancedDevicePreparationManager else None
-
-            # 执行预处理步骤
-            if check_usb and device_manager:
-                print("🔍 执行USB连接检查...")
-                if not device_manager._check_usb_connections():
-                    print("❌ USB连接检查失败")
-                    success = False
-
-            if success and setup_wireless and device_manager:
-                print("📶 配置无线连接...")
-                if not device_manager._setup_wireless_connection(self.device.serial):
-                    print("⚠️ 无线连接配置失败，但继续执行")
-
-            if success and auto_handle_dialog and device_manager:
-                print("🛡️ 配置弹窗自动处理...")
-                device_manager._fix_device_permissions(self.device.serial)
-
-            if success and handle_screen_lock and device_manager:
-                print("🔓 处理屏幕锁定...")
-                print("⚠️ 警告: 正在使用旧版屏幕处理逻辑，建议切换到智能预处理")
-                # 在旧版预处理中也尝试使用智能屏幕检测，避免误操作
+            device_manager = None
+            from enhanced_device_preparation_manager import EnhancedDevicePreparationManager
+            # 检查EnhancedDevicePreparationManager是否可用
+            if EnhancedDevicePreparationManager is None:
+                print("❌ EnhancedDevicePreparationManager未导入，跳过设备预处理")
+            else:
                 try:
+                    device_manager = EnhancedDevicePreparationManager(
+                        save_logs=config["save_logs"]
+                    )
+                    print(f"✅ 设备预处理管理器已加载: {type(device_manager).__name__}")
+                except Exception as init_err:
+                    print(f"❌ 设备预处理管理器初始化失败: {init_err}")
+                    device_manager = None
+
+            if not device_manager:
+                print("⚠️ 设备预处理管理器不可用，跳过预处理执行")
+            else:
+                print("📱 开始设备预处理...")
+                def run_usb_check():
+                    print("🔍 执行USB连接检查...")
+                    if not device_manager._check_usb_connections():
+                        print("❌ USB连接检查失败")
+                        return False
+                    return True
+
+                def run_wireless():
+                    print("📶 配置无线连接...")
+                    if not device_manager._setup_wireless_connection(
+                        self.device.serial
+                    ):
+                        print("⚠️ 无线连接配置失败，但继续执行")
+                    return True
+
+                def run_auto_dialog():
+                    print("🛡️ 配置弹窗自动处理...")
+                    device_manager._fix_device_permissions(self.device.serial)
+                    return True
+
+                def run_screen_lock():
+                    print("🔓 处理屏幕锁定...")
+
                     from screen_state_detector import ScreenStateDetector
                     detector = ScreenStateDetector(self.device.serial)
-                    screen_ready = detector.ensure_screen_ready()
-                    if screen_ready:
+                    if detector.ensure_screen_ready():
                         print("✅ 智能屏幕检测成功，跳过旧版屏幕处理")
-                    else:
-                        print("⚠️ 智能屏幕检测失败，使用旧版屏幕处理")
-                        device_manager._handle_screen_lock(self.device.serial)
-                except ImportError:
-                    print("⚠️ 无法导入智能屏幕检测，使用旧版屏幕处理")
-                    device_manager._handle_screen_lock(self.device.serial)
-                except Exception as e:
-                    print(f"❌ 智能屏幕检测异常: {e}，使用旧版屏幕处理")
-                    device_manager._handle_screen_lock(self.device.serial)
+                        return True
 
-            if success and setup_input_method and device_manager:
-                print("⌨️ 设置输入法...")
-                if not device_manager._wake_up_yousite(self.device.serial):
-                    print("⚠️ 输入法设置失败，但继续执行")
+                def run_input_method():
+                    print("⌨️ 设置输入法...")
+                    if not device_manager._wake_up_yousite(self.device.serial):
+                        print("⚠️ 输入法设置失败，但继续执行")
+                    return True
 
-            print(f"✅ 设备预处理完成，结果: {'成功' if success else '失败'}")
+                operations = [
+                    (config["check_usb"], True, run_usb_check),
+                    (config["setup_wireless"], False, run_wireless),
+                    (config["auto_handle_dialog"], False, run_auto_dialog),
+                    (config["handle_screen_lock"], False, run_screen_lock),
+                    (config["setup_input_method"], False, run_input_method),
+                ]
 
-        except Exception as e:
-            print(f"❌ 设备预处理过程中出现错误: {e}")
+                for enabled, critical, executor in operations:
+                    if not enabled:
+                        continue
+                    result = executor()
+                    if critical and result is False:
+                        success = False
+                        break
+
+        except Exception as err:
+            print(f"❌ 设备预处理过程中出现错误: {err}")
             success = False
 
-        # 获取截图目录
+        print(f"✅ 设备预处理完成，结果: {'成功' if success else '失败'}")
+
+        # 获取设备截图用于报告展示
         log_dir = None
         if self.log_txt_path:
             log_dir = os.path.dirname(self.log_txt_path)
 
-        # 创建screen对象
+        # 创建screen对象（内部会自动截取当前屏幕状态）
         screen_data = self._create_unified_screen_object(
             log_dir,
             pos_list=[],
@@ -1204,7 +1213,6 @@ class ActionProcessor:
             rect_info=[]
         )
 
-        # 记录设备预处理日志
         timestamp = time.time()
         device_prep_entry = {
             "tag": "function",
@@ -1214,26 +1222,27 @@ class ActionProcessor:
                 "name": "device_preparation",
                 "call_args": {
                     "device_serial": self.device.serial,
-                    "check_usb": check_usb,
-                    "setup_wireless": setup_wireless,
-                    "auto_handle_dialog": auto_handle_dialog,
-                    "handle_screen_lock": handle_screen_lock,
-                    "setup_input_method": setup_input_method,
-                    "save_logs": save_logs
+                    "check_usb": config["check_usb"],
+                    "setup_wireless": config["setup_wireless"],
+                    "auto_handle_dialog": config["auto_handle_dialog"],
+                    "handle_screen_lock": config["handle_screen_lock"],
+                    "setup_input_method": config["setup_input_method"],
+                    "save_logs": config["save_logs"]
                 },
                 "start_time": timestamp,
                 "ret": success,
                 "end_time": timestamp + 1.0
             }
         }
-        # 添加screen对象到日志条目（如果可用）
         if screen_data:
             device_prep_entry["data"]["screen"] = screen_data
 
-        # 添加 executed 字段到日志条目
         device_prep_entry["data"]["executed"] = success
 
         self._write_log_entry(device_prep_entry)
+        
+        # 标记预处理已执行
+        self._device_preparation_executed = True
 
         return ActionResult(
             success=True,
@@ -1247,14 +1256,9 @@ class ActionProcessor:
     def _handle_app_start(self, step, step_idx):
         """处理应用启动步骤"""
         print(f"处理应用启动步骤: {step_idx + 1}")
-        params = step.get("params", {})
         step_remark = step.get("remark", "")
-        app_name = params.get("app_name", "")
-        package_name = params.get("package_name", "")        # 扁平化权限配置参数（兼容多种参数名）
-        handle_permission = params.get("handle_permission", True)  # 废弃，使用AI代替。250709 17:23
-        permission_wait = params.get("permission_wait_time", params.get("permission_wait", 10))
-        allow_permission = params.get("auto_allow_permission", params.get("allow_permission", True)) # 废弃，使用AI代替。250709 17:23
-        first_only = params.get("first_only", False)
+        app_name = step.get("app_name", "")
+        package_name = step.get("package_name", "")        # 扁平化权限配置参数（兼容多种参数名）
 
         if not package_name:
             print(f"错误: app_start 步骤必须提供 package_name 参数")
@@ -1266,15 +1270,6 @@ class ActionProcessor:
 
         print(f"启动应用: {app_name or package_name} - {step_remark}")
 
-        # 构建权限配置（转换为内部格式）
-        permission_config = {
-            "handle": handle_permission,
-            "wait": permission_wait,
-            "allow": allow_permission,
-            "first_only": first_only
-        }
-        print(f"🔧 权限配置:permission_config={permission_config}")
-        # print(f"🔧 权限配置:handle={handle_permission}, wait={permission_wait}s, allow={allow_permission}, first_only={first_only}")
 
         try:
             # 步骤1: 首先实际启动应用
@@ -1293,38 +1288,6 @@ class ActionProcessor:
                 startup_success = False
             print(f"应用启动命令执行: {'成功' if startup_success else '失败'}")
 
-            # 步骤2: 如果应用启动成功，等待一下然后处理权限
-            if startup_success:
-                print("⏱️ 等待应用完全启动...")
-                # 根据配置决定是否处理权限弹窗
-                if handle_permission:
-                    time.sleep(5)  # 增加等待时间到5秒，给应用更多时间加载权限弹窗
-                    print("🔍 开始权限弹窗检测和处理...")
-                    # 处理权限弹窗
-                    try:
-                        if integrate_with_app_launch:
-                            result = integrate_with_app_launch(
-                                self.device.serial,
-                                app_identifier,
-                                auto_allow_permissions=allow_permission
-                            )
-                            print(f"权限处理结果: {result}")
-                        else:
-                            print("⚠️ integrate_with_app_launch不可用，跳过权限处理")
-                            result = True
-                    except Exception as e:
-                        print(f"权限处理发生异常: {e}")
-                        print("假设无权限弹窗，继续执行")
-                        result = True  # 异常时假设成功，避免阻塞
-                else:
-                    print("🚫 权限处理已禁用 (handle_permission=false)，跳过权限检测")
-                    result = True
-
-                # 最终结果是启动成功且权限处理成功
-                final_result = startup_success and result
-            else:
-                print("❌ 应用启动失败，跳过权限处理")
-                final_result = False
 
             print(f"应用启动整体结果: {final_result}")
 
@@ -1351,12 +1314,8 @@ class ActionProcessor:
                 "data": {
                     "name": "start_app",
                     "call_args": {
-                        "app_name": app_identifier,
-                        "handle_permission": handle_permission,
-                        "permission_wait": permission_wait,
-                        "allow_permission": allow_permission,
-                        "first_only": first_only
-                    },
+                        "app_name": app_identifier
+                        },
                     "start_time": timestamp,
                     "ret": final_result,
                     "end_time": timestamp + 1
@@ -3695,7 +3654,6 @@ class ActionProcessor:
 
         try:
             # 获取屏幕截图
-            from replay_script import get_device_screenshot
             screenshot = get_device_screenshot(self.device)
             if screenshot is None:
                 return ActionResult(
@@ -3920,7 +3878,6 @@ class ActionProcessor:
 
         try:
             # 获取屏幕截图以获取分辨率
-            from replay_script import get_device_screenshot
             screenshot = get_device_screenshot(self.device)
             if screenshot is None:
                 return ActionResult(
