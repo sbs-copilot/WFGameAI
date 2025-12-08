@@ -274,7 +274,7 @@ def start_usb_monitor(config_path: str = None):
     """
     print_colored("\n====== 启动USB设备监控 ======", 'yellow')
 
-    monitor_script = os.path.join(get_project_root(), "wfgame-ai-server", "scripts", "monitor_usb.py")
+    monitor_script = os.path.join(get_project_root(), "wfgame-ai-server", "apps","scripts", "monitor_usb.py")
 
     if not os.path.exists(monitor_script):
         print_colored(f"错误: USB监控脚本不存在: {monitor_script}", 'red')

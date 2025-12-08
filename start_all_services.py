@@ -45,6 +45,19 @@ processes = []
 should_exit = False
 
 
+def build_subprocess_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """构造子进程环境变量，确保使用UTF-8编码"""
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    if sys.platform == "win32":
+        env.setdefault("LANG", "zh_CN.UTF-8")
+        env.setdefault("LC_ALL", "zh_CN.UTF-8")
+    if extra:
+        env.update(extra)
+    return env
+
+
 def print_colored(text, color='white'):
     """打印彩色文本"""
     colors = {
@@ -76,7 +89,7 @@ def get_env_config(env: str) -> Dict:
             'celery_worker_name': 'ai_worker_dev',
             'celery_pid_file': 'run/celery_dev.pid',
             'celery_log_file': 'run/celery_dev.log',
-            'autoreload': True,
+            'autoreload': False,
             'backend_port': 9000
         }
     else:  # prod
@@ -158,7 +171,8 @@ def start_celery_worker(config: Dict, python_exec: str) -> Optional[subprocess.P
             text=True,
             encoding='utf-8',
             errors='replace',
-            bufsize=1
+            bufsize=1,
+            env=build_subprocess_env()
         )
         
         print_colored(f"✅ Celery Worker 已启动 (PID: {process.pid})", 'green')
@@ -189,7 +203,8 @@ def start_django_backend(config: Dict, python_exec: str) -> Optional[subprocess.
             text=True,
             encoding='utf-8',
             errors='replace',
-            bufsize=1
+            bufsize=1,
+            env=build_subprocess_env()
         )
         
         print_colored(f"✅ Django 后端已启动 (PID: {process.pid})", 'green')
@@ -198,6 +213,57 @@ def start_django_backend(config: Dict, python_exec: str) -> Optional[subprocess.
     except Exception as e:
         print_colored(f"❌ Django 后端启动失败: {e}", 'red')
         return None
+
+
+def start_usb_monitor(config: Dict):
+    """
+    启动USB设备监控脚本
+
+    Returns:
+        subprocess.Popen: 监控进程对象
+    """
+    print_colored("\n====== 启动USB设备监控 ======", 'yellow')
+
+    # 更新路径到 apps/scripts
+    monitor_script = os.path.join(
+        get_project_root(), 
+        "wfgame-ai-server", 
+        "apps", 
+        "scripts", 
+        "monitor_usb.py"
+    )
+
+    if not os.path.exists(monitor_script):
+        print_colored(f"错误: USB监控脚本不存在: {monitor_script}", 'red')
+        return None
+
+    # 配置文件环境变量
+    env_vars = {}
+    if config['config_path']:
+        env_vars['WFGAMEAI_CONFIG'] = config['config_path']
+
+    # 启动监控进程
+    process = subprocess.Popen(
+        [sys.executable, monitor_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+        bufsize=1,
+        env=build_subprocess_env(env_vars)
+    )
+
+    print_colored(f"✅ USB设备监控已启动 (PID: {process.pid})", 'green')
+    return process
+
+
+def get_project_root() -> str:
+    """获取项目根目录"""
+    # 当前文件所在目录
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # 项目根目录是当前目录的父目录
+    return os.path.abspath(os.path.join(current_dir, ".."))
 
 
 def monitor_process_output(process: subprocess.Popen, service_name: str, log_file: Optional[str] = None):
@@ -287,7 +353,7 @@ def cleanup_services(config: Dict):
     print_colored("\n正在关闭服务...", 'yellow')
     
     # 停止所有进程
-    for proc in processes:
+    for proc in processes[:]:
         try:
             proc.terminate()
             proc.wait(timeout=5)
@@ -354,6 +420,16 @@ def main():
             threading.Thread(
                 target=monitor_process_output,
                 args=(django_proc, '后端', None),
+                daemon=True
+            ).start()
+        
+        # 启动 USB 监控
+        usb_proc = start_usb_monitor(config)
+        if usb_proc:
+            processes.append(usb_proc)
+            threading.Thread(
+                target=monitor_process_output,
+                args=(usb_proc, 'USB 监控', None),
                 daemon=True
             ).start()
         

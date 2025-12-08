@@ -1278,7 +1278,6 @@ class ActionProcessor:
             print(f"🚀 正在启动应用: {app_identifier}")
             # 使用AppLifecycleManager来实际启动应用
             app_manager = AppLifecycleManager() if AppLifecycleManager else None
-            print(f"应用管理器2: {app_manager}")
             # 现在所有信息都在脚本中提供，直接使用package_name启动
             if package_name and app_manager:
                 print(f"🔍 使用脚本中提供的包名直接启动: {package_name}")
@@ -1289,7 +1288,6 @@ class ActionProcessor:
             print(f"应用启动命令执行: {'成功' if startup_success else '失败'}")
 
 
-            print(f"应用启动整体结果: {final_result}")
 
             # 记录应用启动日志
             timestamp = time.time()
