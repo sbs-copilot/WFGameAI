@@ -100,12 +100,37 @@ def device_worker(device_serial, scripts, shared_results, task_id=None):
             timestamp = datetime.now().strftime("%H:%M:%S")
             print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 运行目录初始化失败: {e}")
 
-        # 获取设备连接
+        # 使用设备连接池获取设备（避免重复初始化）
         device = None
-        for dev in adb.device_list():
-            if dev.serial == device_serial:
-                device = dev
-                break
+        try:
+            from device_connection_pool import get_device_connection_pool
+            
+            pool = get_device_connection_pool()
+            device_info = pool.get_device(device_serial)
+            
+            if device_info and device_info.init_success:
+                device = device_info.device
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 从连接池获取成功")
+            else:
+                # 降级：使用传统方式连接
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 连接池获取失败，尝试传统方式...")
+                
+                for dev in adb.device_list():
+                    if dev.serial == device_serial:
+                        device = dev
+                        break
+                        
+        except Exception as pool_err:
+            # 连接池异常，降级到传统方式
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 连接池异常: {pool_err}，使用传统方式")
+            
+            for dev in adb.device_list():
+                if dev.serial == device_serial:
+                    device = dev
+                    break
 
         if not device:
             timestamp = datetime.now().strftime("%H:%M:%S")
@@ -410,28 +435,37 @@ def replay_scripts_on_devices(device_serials, scripts, max_workers=4, strategy="
         shared_results = manager.dict()
         processes = []
 
-        # 为每台设备创建独立进程
+        # 批量创建所有进程（不启动）
         for i, device_serial in enumerate(device_serials):
             p = Process(
                 target=device_worker,
                 args=(device_serial, scripts, shared_results, task_id)
             )
             p.daemon = True
-            processes.append(p)
+            processes.append((device_serial, p))
+        
+        # 真正的并行启动：所有进程几乎同时启动
+        start_timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{start_timestamp}] 🚀 开始并行启动 {len(processes)} 个设备进程...")
+        
+        for device_serial, p in processes:
             p.start()
-
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[{timestamp}] 已启动设备 {device_serial} 的回放进程，PID: {p.pid}")
-
-            # 错峰启动，避免瞬时ADB冲突
-            time.sleep(0.3)
+            # 极小的延迟（10ms）仅用于避免进程ID冲突，不影响并行性
+            time.sleep(0.01)
+        
+        # 输出所有进程的PID
+        for device_serial, p in processes:
+            print(f"  ✓ 设备 {device_serial} 进程已启动，PID: {p.pid}")
+        
+        end_timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{end_timestamp}] ✅ 所有设备进程启动完成")
 
         # 等待所有进程完成
         print(f"⏳ 等待 {len(processes)} 个进程完成...")
-        for i, p in enumerate(processes):
+        for i, (device_serial, p) in enumerate(processes):
             p.join()
             timestamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[{timestamp}] 进程 {i+1}/{len(processes)} 已完成")
+            print(f"[{timestamp}] 设备 {device_serial} 进程已完成 ({i+1}/{len(processes)})")
 
         # 收集并返回结果
         results = dict(shared_results)

@@ -154,6 +154,162 @@ def get_device_screenshot(device):
             return None
 
 
+def get_screenshot_safe(device, room_id=None, use_cache=False, cache_max_age=2):
+    """
+    安全获取设备截图，支持多种设备类型和截图方式，支持缓存
+    
+    Args:
+        device: 设备对象（可以是airtest设备、mock设备等）
+        room_id: WebSocket房间ID（可选，用于实时推送截图）
+        use_cache: 是否使用缓存（默认False）
+        cache_max_age: 缓存最大有效期（秒，默认2秒）
+    
+    Returns:
+        PIL.Image对象，失败返回None
+    """
+    import io
+    import base64
+    import subprocess
+    from socket_io_http_api_client import SocketIOHttpApiClient
+
+    # 尝试从缓存获取截图
+    if use_cache and hasattr(device, 'serial'):
+        try:
+            from device_connection_pool import get_device_connection_pool
+            pool = get_device_connection_pool()
+            cached_screenshot = pool.get_cached_screenshot(device.serial, cache_max_age)
+            
+            if cached_screenshot:
+                print(f"📸 使用缓存截图（设备: {device.serial}）")
+                
+                # 如果需要推送到前端
+                if room_id:
+                    from PIL import Image as _PILImage
+                    if isinstance(cached_screenshot, _PILImage.Image):
+                        buf = io.BytesIO()
+                        cached_screenshot.save(buf, format='PNG')
+                        pic_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                        try:
+                            SocketIOHttpApiClient().emit(room=room_id, module='replay', event='frame', data=pic_b64)
+                        except Exception as _emit_err:
+                            print(f"⚠️ emit frame 失败: {_emit_err}")
+                
+                return cached_screenshot
+        except Exception as cache_err:
+            print(f"⚠️ 获取缓存截图失败: {cache_err}")
+
+    try:
+        screenshot = None
+        
+        # 优先使用设备自带的screenshot方法
+        if hasattr(device, 'screenshot'):
+            try:
+                screenshot = device.screenshot()
+                if screenshot:
+                    # 如果需要推送到前端
+                    if room_id:
+                        pic_b64 = None
+                        from PIL import Image as _PILImage
+                        if isinstance(screenshot, _PILImage.Image):
+                            buf = io.BytesIO()
+                            screenshot.save(buf, format='PNG')
+                            pic_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                        if pic_b64:
+                            try:
+                                SocketIOHttpApiClient().emit(room=room_id, module='replay', event='frame', data=pic_b64)
+                            except Exception as _emit_err:
+                                print(f"⚠️ emit frame 失败: {_emit_err}")
+                    
+                    # 缓存截图
+                    if use_cache and hasattr(device, 'serial'):
+                        try:
+                            from device_connection_pool import get_device_connection_pool
+                            pool = get_device_connection_pool()
+                            pool.cache_screenshot(device.serial, screenshot)
+                        except Exception:
+                            pass
+                    
+                    return screenshot
+            except Exception as e:
+                print(f"⚠️ 使用设备screenshot方法失败: {e}")
+
+        # 如果设备有snapshot方法（airtest设备）
+        if hasattr(device, 'snapshot'):
+            try:
+                screenshot = device.snapshot()
+                if screenshot:
+                    # 如果需要推送到前端
+                    if room_id:
+                        pic_b64 = None
+                        from PIL import Image as _PILImage
+                        if isinstance(screenshot, _PILImage.Image):
+                            buf = io.BytesIO()
+                            screenshot.save(buf, format='PNG')
+                            pic_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                        if pic_b64:
+                            try:
+                                SocketIOHttpApiClient().emit(room=room_id, module='replay', event='frame', data=pic_b64)
+                            except Exception as _emit_err:
+                                print(f"⚠️ emit frame 失败: {_emit_err}")
+                    
+                    # 缓存截图
+                    if use_cache and hasattr(device, 'serial'):
+                        try:
+                            from device_connection_pool import get_device_connection_pool
+                            pool = get_device_connection_pool()
+                            pool.cache_screenshot(device.serial, screenshot)
+                        except Exception:
+                            pass
+                    
+                    return screenshot
+            except Exception as e:
+                print(f"⚠️ 使用设备snapshot方法失败: {e}")
+
+        # 如果设备没有serial属性，说明可能是Mock设备，已经在上面处理了
+        if not hasattr(device, 'serial'):
+            print("⚠️ 设备没有serial属性且没有screenshot方法，无法获取截图")
+            return None
+
+        # 使用subprocess直接获取字节数据，避免字符编码问题
+        result = subprocess.run(
+            f"adb -s {device.serial} exec-out screencap -p",
+            shell=True,
+            capture_output=True,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout:
+            from PIL import Image
+            # result.stdout 已经是字节数据，统一转成 base64 字符串
+            pic_b64 = base64.b64encode(result.stdout).decode('utf-8')
+            try:
+                SocketIOHttpApiClient().emit(room=room_id, module='replay', event='frame', data=pic_b64)
+            except Exception as _emit_err2:
+                print(f"⚠️ emit frame 失败: {_emit_err2}")
+            
+            screenshot = Image.open(io.BytesIO(result.stdout))
+            
+            # 缓存截图
+            if use_cache:
+                try:
+                    from device_connection_pool import get_device_connection_pool
+                    pool = get_device_connection_pool()
+                    pool.cache_screenshot(device.serial, screenshot)
+                except Exception:
+                    pass
+            
+            return screenshot
+        else:
+            print("⚠️ 警告：screencap命令返回空数据或失败")
+            return None
+    except subprocess.TimeoutExpired:
+        print("❌ 截图超时")
+        return None
+    except Exception as e:
+        print(f"❌ ADB截图失败: {e}")
+        return None
+
+
 class ActionContext:
     """Action执行上下文类 - 统一接口"""
 
@@ -273,10 +429,52 @@ class ActionProcessor:
         self.device_account = None
         # 记录最近一次截图的绝对路径，供步骤结果回填
         self._last_screenshot_path = None
+        
+        # 截图缓存相关
+        self._use_screenshot_cache = True  # 是否启用截图缓存
+        self._device_pool = None  # 设备连接池引用（懒加载）
+        
+        # 性能日志记录器（懒加载）
+        self._perf_logger = None
+        self._step_metrics = {}  # 当前步骤的性能指标
 
     def set_device_account(self, device_account):
         """设置设备账号信息"""
         self.device_account = device_account
+    
+    def _get_perf_logger(self):
+        """获取性能日志记录器（懒加载）"""
+        if self._perf_logger is None:
+            try:
+                from performance_logger import get_performance_logger
+                self._perf_logger = get_performance_logger()
+            except ImportError:
+                # 如果性能日志模块不可用，使用空对象模式
+                class DummyLogger:
+                    def measure_time(self, *args, **kwargs):
+                        from contextlib import contextmanager
+                        @contextmanager
+                        def dummy():
+                            yield
+                        return dummy()
+                    def log_step_performance(self, *args, **kwargs): pass
+                    def log_success(self, *args, **kwargs): pass
+                    def log_failure(self, *args, **kwargs): pass
+                    def log_retry(self, *args, **kwargs): pass
+                    def log_resource_usage(self, *args, **kwargs): pass
+                self._perf_logger = DummyLogger()
+        return self._perf_logger
+    
+    def _record_step_metric(self, metric_name: str, duration: float):
+        """记录步骤性能指标"""
+        self._step_metrics[metric_name] = duration
+    
+    def _log_step_performance(self, step_name: str):
+        """记录步骤性能日志"""
+        if self._step_metrics:
+            logger = self._get_perf_logger()
+            logger.log_step_performance(step_name, self._step_metrics)
+            self._step_metrics = {}  # 清空指标
 
     def _auto_allocate_device_account(self):
         """自动为设备分配账号（智能重试机制）"""
@@ -366,7 +564,8 @@ class ActionProcessor:
         
         # 获取重试配置(默认值: max_retries=3, retry_interval=1秒)
         max_retries = step.get("max_retries", 3)
-        retry_interval = step.get("retry_interval", 1)
+        base_retry_interval = step.get("retry_interval", 1)
+        use_exponential_backoff = step.get("exponential_backoff", True)  # 默认启用指数退避
         
         # 预先初始化result变量，避免未赋值错误
         result = ActionResult(
@@ -375,10 +574,17 @@ class ActionProcessor:
             details={"operation": step_action, "status": "not_executed"}
         )
         
-        # 执行步骤(带重试机制)
+        # 执行步骤(带智能重试机制)
         for attempt in range(max_retries):
             if attempt > 0:
-                print(f"🔄 [步骤 {step_idx + 1}] 第 {attempt + 1}/{max_retries} 次重试...")
+                # 计算重试间隔：指数退避或固定间隔
+                if use_exponential_backoff:
+                    # 指数退避：1s, 2s, 4s...（最大8秒）
+                    retry_interval = min(base_retry_interval * (2 ** (attempt - 1)), 8)
+                else:
+                    retry_interval = base_retry_interval
+                
+                print(f"🔄 [步骤 {step_idx + 1}] 第 {attempt + 1}/{max_retries} 次重试（间隔{retry_interval}秒）...")
                 time.sleep(retry_interval)
             
             result = self._execute_single_action(step, step_idx, log_dir, step_action, step_yolo_class)
@@ -388,6 +594,10 @@ class ActionProcessor:
                 if attempt > 0:
                     print(f"✅ [步骤 {step_idx + 1}] 重试成功 (第 {attempt + 1} 次尝试)")
                 break
+            else:
+                # 记录失败原因，帮助调试
+                failure_reason = result.details.get("failure_reason", "未知原因")
+                print(f"   失败原因: {failure_reason}")
         else:
             # 所有重试都失败
             print(f"❌ [步骤 {step_idx + 1}] 重试 {max_retries} 次后仍然失败")
@@ -879,12 +1089,55 @@ class ActionProcessor:
                 executed=False
             )
     
+    def _analyze_ocr_failure(self, result, ocr_keywords, ocr_min_score):
+        """
+        分析OCR检测失败的原因
+        
+        Args:
+            result: OCR检测结果字典（可能为None）
+            ocr_keywords: 目标关键字
+            ocr_min_score: 置信度阈值
+            
+        Returns:
+            str: 失败原因描述
+        """
+        if result is None:
+            return "OCR检测返回空结果"
+        
+        # 检查是否有识别到任何文本
+        all_texts = result.get("all_texts", [])
+        all_scores = result.get("all_scores", [])
+        
+        if not all_texts:
+            return "OCR未识别到任何文本（可能是界面正在加载或文本太小）"
+        
+        # 检查置信度过滤
+        high_conf_texts = [t for t, s in zip(all_texts, all_scores) if s >= ocr_min_score]
+        if not high_conf_texts:
+            max_score = max(all_scores) if all_scores else 0
+            return f"所有识别文本的置信度都低于阈值{ocr_min_score}（最高置信度: {max_score:.2f}）"
+        
+        # 检查关键字匹配
+        if ocr_keywords:
+            keywords_list = [k.strip() for k in ocr_keywords.split(',')]
+            return f"识别到{len(high_conf_texts)}个高置信度文本，但都不包含关键字: {keywords_list}"
+        
+        return "OCR检测失败（未知原因）"
+    
     def _handle_ocr_only_detection(self, step, step_idx, log_dir):
-        """处理纯OCR检测模式(全屏搜索)"""
+        """
+        处理纯OCR检测模式(全屏搜索)
+        
+        优化说明:
+        - 全屏OCR检测使用更低的默认置信度阈值(0.4)
+        - 因为全屏检测范围大，文本可能较小或背景复杂
+        - 可通过step配置覆盖默认值
+        """
         ocr_keywords = step.get("ocr_keywords")
-        ocr_min_score = step.get("ocr_min_score", 0.5)
+        # 全屏OCR使用更低的默认阈值(0.4)，因为检测范围大、文本可能较小
+        ocr_min_score = step.get("ocr_min_score", 0.4)
         step_remark = step.get("remark", "")
-        print(f"[OCR模式] 关键字: {ocr_keywords}, 最小置信度: {ocr_min_score}")
+        print(f"[OCR模式] 关键字: {ocr_keywords}, 最小置信度: {ocr_min_score} (全屏检测)")
         
         try:
             screenshot = get_device_screenshot(self.device)
@@ -963,11 +1216,20 @@ class ActionProcessor:
                     executed=True
                 )
             else:
+                # 分析失败原因
+                failure_reason = self._analyze_ocr_failure(result, ocr_keywords, ocr_min_score)
                 print(f"❌ OCR未找到匹配的文本: {ocr_keywords}")
+                print(f"   {failure_reason}")
+                
                 return ActionResult(
                     success=False,
                     message=f"OCR未找到匹配的文本: {ocr_keywords}",
-                    details={"operation": "ai_detection_click", "ocr_keywords": ocr_keywords},
+                    details={
+                        "operation": "ai_detection_click", 
+                        "ocr_keywords": ocr_keywords,
+                        "failure_reason": failure_reason,
+                        "ocr_min_score": ocr_min_score
+                    },
                     executed=False
                 )
                 

@@ -224,9 +224,12 @@ def start_usb_monitor(config: Dict):
     """
     print_colored("\n====== 启动USB设备监控 ======", 'yellow')
 
-    # 更新路径到 apps/scripts
+    # 获取当前脚本所在目录（WFGameAI根目录）
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # 构建监控脚本路径
     monitor_script = os.path.join(
-        get_project_root(), 
+        current_dir,
         "wfgame-ai-server", 
         "apps", 
         "scripts", 
@@ -239,8 +242,13 @@ def start_usb_monitor(config: Dict):
 
     # 配置文件环境变量
     env_vars = {}
-    if config['config_path']:
-        env_vars['WFGAMEAI_CONFIG'] = config['config_path']
+    if config.get('config_file'):
+        # 构建完整的配置文件路径
+        config_path = os.path.join(current_dir, config['config_file'])
+        env_vars['WFGAMEAI_CONFIG'] = config_path
+
+    # 设置工作目录为 wfgame-ai-server
+    work_dir = os.path.join(current_dir, "wfgame-ai-server")
 
     # 启动监控进程
     process = subprocess.Popen(
@@ -251,6 +259,7 @@ def start_usb_monitor(config: Dict):
         encoding='utf-8',
         errors='replace',
         bufsize=1,
+        cwd=work_dir,  # 设置工作目录
         env=build_subprocess_env(env_vars)
     )
 

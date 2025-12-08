@@ -12,9 +12,11 @@ def print_realtime(message):
 # 导入YOLO和模型加载功能
 try:
     from ultralytics import YOLO
-    print_realtime("✅ 成功导入ultralytics YOLO")
+    # 成功导入不需要打印，避免日志污染
+    # print_realtime("✅ 成功导入ultralytics YOLO")
 except ImportError as e:
-    track_error(f"⚠️ 导入ultralytics失败: {e}")
+    # 导入失败才需要记录错误
+    print_realtime(f"❌ 导入ultralytics失败: {e}")
     YOLO = None
     
 try:
@@ -92,11 +94,17 @@ def _get_ocr_pipeline():
             return _OCR_PIPELINE
         
         try:
+            import os
             from paddlex import create_pipeline
-            print_realtime("🔧 [全局单例] 初始化OCR Pipeline...")
+            
+            # 标注进程PID，帮助理解多进程场景
+            pid = os.getpid()
+            print_realtime(f"🔧 [进程PID:{pid}] 初始化OCR Pipeline（进程级单例）...")
+            
             # 使用最简单的配置,预处理参数在predict时传入
             _OCR_PIPELINE = create_pipeline(pipeline="OCR")
-            print_realtime("✅ [全局单例] OCR Pipeline初始化完成，后续调用将直接复用")
+            
+            print_realtime(f"✅ [进程PID:{pid}] OCR Pipeline初始化完成，后续调用将直接复用")
             return _OCR_PIPELINE
         except Exception as e:
             msg = f"❌ OCR Pipeline初始化失败: {e}"
@@ -1347,13 +1355,6 @@ except ImportError:
     except ImportError:
         DeviceScriptReplayer = None
 
-try:
-    from app_permission_manager import integrate_with_app_launch
-except ImportError:
-    try:
-        from .app_permission_manager import integrate_with_app_launch
-    except ImportError:
-        integrate_with_app_launch = None
 
 try:
     from enhanced_device_preparation_manager import EnhancedDevicePreparationManager
@@ -1497,7 +1498,8 @@ except ImportError as e:
     ReportGenerator = None
 
 # 全局修补shutil.copytree以解决Airtest静态资源复制问题
-print_realtime("🔧 应用全局shutil.copytree修补，防止静态资源复制冲突")
+# 这是正常的初始化操作，不需要打印日志
+# print_realtime("🔧 应用全局shutil.copytree修补，防止静态资源复制冲突")
 _original_copytree = shutil.copytree
 
 def _patched_copytree(src, dst, symlinks=False, ignore=None, copy_function=shutil.copy2,
@@ -1573,17 +1575,27 @@ model = None
 
 
 def load_yolo_model_for_detection():
-    """只从config.ini的[paths]段读取model_path加载YOLO模型，未找到直接抛异常。禁止使用绝对路径。"""
+    """
+    只从config.ini的[paths]段读取model_path加载YOLO模型，未找到直接抛异常。禁止使用绝对路径。
+    
+    优化说明:
+    - 进程级单例模式：每个进程只加载一次模型
+    - 详细加载日志：显示进程PID、文件大小、加载耗时
+    - Windows spawn模式：每个子进程都会独立加载（无法跨进程共享）
+    """
     global model
+    import time
+    import os
     
     # 单例检查: 如果模型已加载,直接返回
     if model is not None:
-        print_realtime("✅ YOLO模型已加载,复用现有实例")
+        print_realtime(f"✅ YOLO模型已加载(进程PID:{os.getpid()})，复用现有实例")
         return True
     
     if YOLO is None:
         print_realtime("❌ 无法加载YOLO模型：ultralytics未正确导入")
         raise RuntimeError("YOLO未正确导入")
+    
     try:
         # 获取项目根目录并定位 config.ini
         from pathlib import Path
@@ -1592,33 +1604,42 @@ def load_yolo_model_for_detection():
         config = settings.CFG._config
         if 'paths' not in config or 'model_path' not in config['paths']:
             raise KeyError("config.ini的[paths]段未配置model_path")
-        # 递归变量替换
-        def resolve_var(val, section):
-            import re
-            pattern = re.compile(r'\$\{([^}]+)\}')
-            while True:
-                match = pattern.search(val)
-                if not match:
-                    break
-                var = match.group(1)
-                rep = config[section].get(var) or config['paths'].get(var) or ''
-                val = val.replace(f'${{{var}}}', rep)
-            return val
-        # raw_path = resolve_var(config['paths']['model_path'], 'paths')
-        # 修正为递归变量替换后，直接用configparser的get方法，自动展开变量
+        
+        # 获取模型路径
         raw_path = config.get('paths', 'model_path')
+        
         # 构造模型文件绝对路径
         model_file = Path(raw_path)
         if not model_file.is_absolute():
             model_file = project_root / model_file
+        
         if not model_file.exists():
             raise FileNotFoundError(f"[paths]段model_path指定的模型文件不存在: {model_file}")
-        print_realtime(f"🔄 加载模型文件: {model_file}")
+        
+        # 记录加载开始时间和文件信息
+        start_time = time.time()
+        model_size_mb = model_file.stat().st_size / (1024 * 1024)
+        
+        print_realtime(f"🔄 [进程PID:{os.getpid()}] 开始加载YOLO模型...")
+        print_realtime(f"   模型文件: {model_file.name}")
+        print_realtime(f"   文件大小: {model_size_mb:.1f} MB")
+        
+        # 加载模型
         model = YOLO(str(model_file))
-        print_realtime(f"✅ YOLO模型加载成功: {type(model)}")
+        
+        # 记录加载耗时
+        load_time = time.time() - start_time
+        
+        print_realtime(f"✅ [进程PID:{os.getpid()}] YOLO模型加载成功")
+        print_realtime(f"   加载耗时: {load_time:.2f} 秒")
+        print_realtime(f"   模型类型: {type(model).__name__}")
+        
         if model is not None and hasattr(model, 'names'):
-            print_realtime(f"📋 模型类别(过长，未打印)...")
+            class_count = len(model.names) if model.names else 0
+            print_realtime(f"   类别数量: {class_count}")
+        
         return True
+        
     except Exception as e:
         print_realtime(f"❌ YOLO模型加载失败: {e}")
         model = None
@@ -2569,14 +2590,14 @@ def apply_defaults_to_steps(steps):
     # 应用defaults到每个步骤
     if defaults:
         for idx, step in enumerate(steps):
-            print_realtime(f"🔧 步骤{idx+1}合并前: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
+            # print_realtime(f"🔧 步骤{idx+1}合并前: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
             for key, value in defaults.items():
                 if key not in step:
                     step[key] = value
                 #     print_realtime(f"   ✅ 应用defaults: {key}={value}")
                 # else:
                 #     print_realtime(f"   ⏭️  跳过(已存在): {key}={step[key]}")
-            print_realtime(f"🔧 步骤{idx+1}合并后: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
+            # print_realtime(f"🔧 步骤{idx+1}合并后: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
     
     return steps
 
@@ -3285,13 +3306,13 @@ def main():
     print_realtime("=" * 60)
     print_realtime("🚀 replay_script.py 启动")
     print_realtime(f"📅 启动时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print_realtime(f"🐍 Python版本: {sys.version}")
+    # print_realtime(f"🐍 Python版本: {sys.version}")
     print_realtime(f"📁 工作目录: {os.getcwd()}")
-    print_realtime(f"📝 脚本路径: {__file__ if '__file__' in globals() else 'unknown'}")
-    print_realtime(f"🔧 命令行参数数量: {len(sys.argv)}")
-    print_realtime("🔧 完整命令行参数:")
-    for i, arg in enumerate(sys.argv):
-        print_realtime(f"   argv[{i}]: {arg}")
+    # print_realtime(f"📝 脚本路径: {__file__ if '__file__' in globals() else 'unknown'}")
+    # print_realtime(f"🔧 命令行参数数量: {len(sys.argv)}")
+    # print_realtime("🔧 完整命令行参数:")
+    # for i, arg in enumerate(sys.argv):
+    #     print_realtime(f"   argv[{i}]: {arg}")
     print_realtime("=" * 60)
 
     # 加载YOLO模型用于AI检测
@@ -3377,7 +3398,7 @@ def main():
         if getattr(args, 'task_id', None) is not None:
             canonical_cmd += ['--task-id', str(args.task_id)]
         quoted = ' '.join(shlex.quote(x) for x in canonical_cmd)
-        print_realtime(f"🧭 规范化执行命令: {quoted}")
+        # print_realtime(f"🧭 规范化执行命令: {quoted}")
     except Exception as e:
         print_realtime(f"⚠️ 构建规范化执行命令失败: {e}")
 
