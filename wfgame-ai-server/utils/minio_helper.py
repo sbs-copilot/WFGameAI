@@ -13,6 +13,7 @@ import mimetypes
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from django.conf import settings
 from minio import Minio
@@ -394,6 +395,110 @@ def upload_file(bucket: str, object_name: str, file_path: str, content_type: Opt
     except Exception as e:
         print(f"[minio] upload_file 失败: {e}")
         return None
+
+
+def upload_file_deduplicated(bucket: str, file_path: str, object_path: str = '',
+                             content_type: Optional[str] = None) -> Optional[str]:
+    """
+    去重上传（独立函数版）：使用文件内容的哈希值作为对象名。
+    """
+    if not ensure_bucket(bucket):
+        return None
+    p = Path(file_path)
+    if not p.is_file():
+        print(f"[minio] upload_file_deduplicated: 文件不存在 {file_path}")
+        return None
+    object_path = object_path.lstrip('/')
+
+    client = _client()
+    if not client:
+        return None
+
+    try:
+        client.stat_object(bucket, object_path)
+        return object_url(bucket, object_path)
+    except S3Error as e:
+        if e.code == 'NoSuchKey':
+            return upload_file(bucket, object_path, str(p), content_type)
+        else:
+            print(f"[minio] check existence failed: {e}")
+            return None
+
+
+def batch_upload_file_deduplicated(bucket: str, items: list[tuple], max_workers: int = 20) -> dict[str, str]:
+    """
+    批量去重上传，使用线程池并发处理以最小化时间复杂度。
+    无需重复初始化客户端和检查 bucket。
+
+    :param bucket: 目标桶名
+    :param items: 待上传项列表，每项为一个元组:
+                  (local_file_path, object_path) 或 (local_file_path, object_path, content_type)
+    :param max_workers: 并发线程数，默认 20
+    :return: 成功项字典 {object_path: url}
+    """
+    if not ensure_bucket(bucket):
+        return {}
+
+    client = _client()
+    if not client:
+        return {}
+
+    results = {}
+
+    def _process_one(item: tuple) -> tuple[str, Optional[str]]:
+        # 解析参数
+        if len(item) == 3:
+            f_path, o_path, c_type = item
+        elif len(item) == 2:
+            f_path, o_path = item
+            c_type = None
+        else:
+            return "", None
+
+        o_path = o_path.lstrip('/')
+        p = Path(f_path)
+
+        if not p.is_file():
+            # print(f"[minio] batch: 文件不存在 {f_path}")
+            return o_path, None
+
+        # 1. 检查是否存在 (stat_object 是轻量级元数据请求)
+        try:
+            client.stat_object(bucket, o_path)
+            # 已存在，直接返回 URL
+            return o_path, object_url(bucket, o_path)
+        except S3Error as e:
+            if e.code != 'NoSuchKey':
+                print(f"[minio] batch check failed {o_path}: {e}")
+                return o_path, None
+            # NoSuchKey -> 继续执行上传
+        except Exception as e:
+            print(f"[minio] batch check error {o_path}: {e}")
+            return o_path, None
+
+        # 2. 上传文件
+        ct = c_type or _guess_mime(p)
+        try:
+            client.fput_object(bucket, o_path, str(p), content_type=ct)
+            return o_path, object_url(bucket, o_path)
+        except Exception as e:
+            print(f"[minio] batch upload failed {o_path}: {e}")
+            return o_path, None
+
+    # 使用线程池并发处理
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交任务
+        future_to_path = {executor.submit(_process_one, item): item for item in items}
+
+        for future in as_completed(future_to_path):
+            try:
+                o_path, url = future.result()
+                if o_path and url:
+                    results[o_path] = url
+            except Exception as e:
+                print(f"[minio] batch task exception: {e}")
+
+    return results
 
 
 def download_file(bucket: str, object_name: str, dest_path: str) -> Optional[str]:

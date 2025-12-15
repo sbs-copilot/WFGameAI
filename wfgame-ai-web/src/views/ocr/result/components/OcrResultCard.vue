@@ -13,12 +13,12 @@
       >
         <div class="image-wrapper">
           <el-image
-            :title="mediaUrl(result.image_path)"
+            :title="ocrImageUrl(result.image_hash)"
             :style="{
               width: '100%',
               height: showTransImage ? '180px' : '180px'
             }"
-            :src="mediaUrl(result.image_path)"
+            :src="ocrImageUrl(result.image_hash)"
             fit="scale-down"
             lazy
             @click="handleImageClick(result, 'original')"
@@ -57,7 +57,11 @@
         </div>
       </div>
       <div class="info-container">
-        <h3 class="image-name" :title="getImgName(result.image_path)">
+        <h3
+          class="image-name"
+          :title="result.image_path"
+          @click="handleCopyText(result.image_path)"
+        >
           {{ getImgName(result.image_path) }}
         </h3>
         <p class="info-item">
@@ -110,12 +114,6 @@
           <span>
             {{ result.languages || "-" }}
           </span>
-        </p>
-        <p v-if="false" class="info-item" :title="result.image_path">
-          路径:
-          <a :href="mediaUrl(result.image_path)" target="_blank">
-            {{ result.image_path || "-" }}
-          </a>
         </p>
         <p v-if="false" class="info-item" :title="result.image_path">
           哈希值:
@@ -172,7 +170,7 @@ import { type OcrResult, ocrResultApi } from "@/api/ocr";
 import { ocrResultTypeEnum } from "@/utils/enums";
 import { ref, computed } from "vue";
 import { superRequest } from "@/utils/request";
-import { mediaUrl } from "@/api/utils";
+import { ocrImageUrl, mediaUrl } from "@/api/utils";
 import { copyText } from "@/utils/utils";
 import { Picture, User } from "@element-plus/icons-vue";
 

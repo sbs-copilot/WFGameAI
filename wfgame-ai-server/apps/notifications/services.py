@@ -18,6 +18,8 @@ class SSEEvent(Enum):
     ACTION_UPDATE = 'action_update'
     # 设备更新
     DEVICE_UPDATE = 'device_update'
+    # OCR离线报告导出
+    OCR_REPORT_EXPORT = 'ocr_report_export'
 
 
 class SSEConnectionManager:

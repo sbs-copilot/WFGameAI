@@ -210,9 +210,30 @@
     <script id="data-injection">
       window.__LOCAL_DATA__ = null;
     </script>
+    <script id="config-injection">
+      window.__LOCAL_CONFIG__ = null;
+    </script>
   </head>
   <body>
     <div id="app">Loading...</div>
+
+    <!-- ========================================== -->
+    <!-- 数据注入区 (Data Islands) -->
+    <!-- 使用 type="application/json" 避免 JS 语法错误 -->
+    <!-- ========================================== -->
+    <script type="application/json" id="dj-data-task">
+      {{ task_json|safe }}
+    </script>
+    <script type="application/json" id="dj-data-results">
+      {{ results_json|safe }}
+    </script>
+    <script type="application/json" id="dj-data-filter">
+      {{ filter_data_json|safe }}
+    </script>
+    <script type="application/json" id="dj-data-enums">
+      {{ enums_json|safe }}
+    </script>
+
     {% verbatim %}
     <script type="text/x-template" id="app-template">
       <el-container class="main-container">
@@ -269,18 +290,18 @@
                     </div>
                     <div class="filter-group-item">
                         <span class="label-text">需要翻译：</span>
-                        <el-radio-group v-model="filterData.noTranslation" @change="handleSearch" size="small">
-                            <el-radio-button :label="null">全部</el-radio-button>
-                            <el-radio-button :label="false">是</el-radio-button>
-                            <el-radio-button :label="true">否</el-radio-button>
+                        <el-radio-group v-model="filterData.noTranslation" @change="handleSearch">
+                            <el-radio-button :label="null">全部 ({{ counts.total }})</el-radio-button>
+                            <el-radio-button :label="false">是 ({{ counts.needTrans }})</el-radio-button>
+                            <el-radio-button :label="true">否 ({{ counts.noNeedTrans }})</el-radio-button>
                         </el-radio-group>
                     </div>
                     <div class="filter-group-item">
                         <span class="label-text">已填写翻译：</span>
-                        <el-radio-group v-model="filterData.hasTranslation" @change="handleSearch" size="small">
-                            <el-radio-button :label="null">全部</el-radio-button>
-                            <el-radio-button :label="true">是</el-radio-button>
-                            <el-radio-button :label="false">否</el-radio-button>
+                        <el-radio-group v-model="filterData.hasTranslation" @change="handleSearch">
+                            <el-radio-button :label="null">全部 ({{ counts.total }})</el-radio-button>
+                            <el-radio-button :label="true">是 ({{ counts.hasTrans }})</el-radio-button>
+                            <el-radio-button :label="false">否 ({{ counts.noHasTrans }})</el-radio-button>
                         </el-radio-group>
                     </div>
                 </div>
@@ -318,7 +339,32 @@
                                     </div>
                                 </div>
                                 
-                                <div class="ocr-text-box" title="OCR识别文本">
+                                <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px;">
+                                    <el-button 
+                                        size="small" 
+                                        type="primary" 
+                                        plain
+                                        @click="handleCopyLocalCommand(item.image_path)"
+                                        title="复制打开命令 (Win+R 粘贴即可打开文件夹并选中文件)"
+                                        style="padding: 5px 8px;"
+                                    >
+                                        <el-icon style="margin-right: 4px;"><FolderOpened /></el-icon>
+                                        本地定位
+                                    </el-button>
+                                    
+                                    <el-tooltip content="设置本地仓库根目录" placement="top">
+                                        <el-button 
+                                            size="small" 
+                                            circle 
+                                            @click="handleSetLocalRoot"
+                                            style="padding: 5px;"
+                                        >
+                                            <el-icon><Setting /></el-icon>
+                                        </el-button>
+                                    </el-tooltip>
+                                </div>
+                                
+                                <div v-if="false" class="ocr-text-box" title="OCR识别文本">
                                     {{ getResultText(item) || "（无识别文本）" }}
                                 </div>
 
@@ -365,15 +411,54 @@
 
     <script>
       const { createApp, ref, computed, reactive, watch, onMounted } = Vue;
-      const { Search, RefreshLeft } = ElementPlusIconsVue;
+      const { Search, RefreshLeft, FolderOpened, Setting } = ElementPlusIconsVue;
 
       const App = {
         template: '#app-template',
         setup() {
-          const task = {{ task_json|safe }};
-          const allResults = {{ results_json|safe }};
-          const exportFilterData = {{ filter_data_json|safe }};
-          const enums = {{ enums_json|safe }};
+          // --- 数据加载工具 ---
+          const loadServerData = (elementId, mockData) => {
+            const el = document.getElementById(elementId);
+            if (!el) return mockData;
+            
+            const rawContent = el.textContent.trim();
+            // 如果内容为空，或者包含未渲染的 Django 模板标签 {{ ... }}，则使用 Mock 数据
+            if (!rawContent || rawContent.startsWith('{{')) {
+              console.warn(`[DevMode] Using mock data for ${elementId}`);
+              return mockData;
+            }
+            
+            try {
+              return JSON.parse(rawContent);
+            } catch (e) {
+              console.error(`Failed to parse JSON for ${elementId}`, e);
+              return mockData;
+            }
+          };
+
+          // --- Mock Data 定义 (用于本地调试) ---
+          const MOCK_ENUMS = {
+            ocrResultTypeEnum: {
+              SUCCESS: { value: 1, label: "成功" },
+              ERROR: { value: 2, label: "失败" },
+              IGNORE: { value: 0, label: "忽略" }
+            }
+          };
+          
+          const MOCK_RESULTS = Array.from({ length: 5 }).map((_, i) => ({
+            id: i + 1,
+            image_path: `mock/path/image_${i + 1}.png`,
+            image_url: "https://via.placeholder.com/400x200?text=Mock+Image",
+            result_type: 1,
+            texts: [`Mock OCR Text Line ${i + 1}`],
+            pic_resolution: "1920x1080"
+          }));
+
+          // --- 初始化数据 ---
+          const task = loadServerData('dj-data-task', { id: 'LOCAL-DEBUG-TASK' });
+          const allResults = loadServerData('dj-data-results', MOCK_RESULTS);
+          const exportFilterData = loadServerData('dj-data-filter', {});
+          const enums = loadServerData('dj-data-enums', MOCK_ENUMS);
           
           // Local Data State
           const localData = reactive({});
@@ -381,6 +466,11 @@
           // Initialize local data
           // 优先使用注入的数据，否则初始化为空
           const injectedData = window.__LOCAL_DATA__;
+          
+          // Local Config
+          const LOCAL_ROOT_KEY = "wfgame_local_root_path";
+          const injectedConfig = window.__LOCAL_CONFIG__;
+          const localRootPath = ref(injectedConfig?.localRootPath || localStorage.getItem(LOCAL_ROOT_KEY) || "");
           
           allResults.forEach(item => {
               if (injectedData && injectedData[item.id]) {
@@ -397,16 +487,20 @@
               try {
                   // 1. 获取当前 HTML 内容
                   let htmlContent = document.documentElement.outerHTML;
-                  
+
                   // 2. 准备要注入的数据
                   const dataScript = `window.__LOCAL_DATA__ = ${JSON.stringify(localData)};`;
+                  const configScript = `window.__LOCAL_CONFIG__ = ${JSON.stringify({ localRootPath: localRootPath.value })};`;
                   
                   // 3. 替换注入点
                   // 使用正则替换 script 标签内容
-                  const regex = /<script id="data-injection">[\s\S]*?<\/script>/;
-                  const replacement = `<script id="data-injection">${dataScript}<\/script>`;
-                  
-                  htmlContent = htmlContent.replace(regex, replacement);
+                  const regexData = /<script id="data-injection">[\s\S]*?<\/script>/;
+                  const replacementData = `<script id="data-injection">${dataScript}<\/script>`;
+                  htmlContent = htmlContent.replace(regexData, replacementData);
+
+                  const regexConfig = /<script id="config-injection">[\s\S]*?<\/script>/;
+                  const replacementConfig = `<script id="config-injection">${configScript}<\/script>`;
+                  htmlContent = htmlContent.replace(regexConfig, replacementConfig);
                   
                   // 4. 创建 Blob 并下载
                   const blob = new Blob([htmlContent], { type: 'text/html' });
@@ -448,6 +542,36 @@
           });
 
           const filteredResults = ref([...allResults]);
+
+          const counts = computed(() => {
+            let needTrans = 0;
+            let noNeedTrans = 0;
+            let hasTrans = 0;
+            let noHasTrans = 0;
+
+            allResults.forEach(item => {
+                const itemData = localData[item.id];
+                if (itemData.noTranslation) {
+                    noNeedTrans++;
+                } else {
+                    needTrans++;
+                }
+
+                if (itemData.translation && itemData.translation.trim()) {
+                    hasTrans++;
+                } else {
+                    noHasTrans++;
+                }
+            });
+
+            return {
+                total: allResults.length,
+                needTrans,
+                noNeedTrans,
+                hasTrans,
+                noHasTrans
+            };
+          });
 
           const handleSearch = () => {
             pagination.currentPage = 1;
@@ -547,6 +671,124 @@
               return val;
           };
 
+          // Local Path Logic
+          const handleSetLocalRoot = async () => {
+            try {
+              const { value } = await ElementPlus.ElMessageBox.prompt(
+                `
+                <div style="text-align: left; line-height: 1.6;">
+                    <p style="margin-bottom: 10px; color: #E6A23C; font-size: 13px;">
+                        ⚠️ 由于浏览器安全限制，网页无法自动获取文件夹的<b>绝对路径</b>（即盘符信息），因此无法使用"选择目录"功能。
+                    </p>
+                    <p style="margin-bottom: 5px; font-weight: bold;">请手动完成一次性配置：</p>
+                    <ol style="margin: 0 0 10px 20px; color: #606266; font-size: 13px;">
+                        <li>在资源管理器中打开您的项目根目录</li>
+                        <li>点击顶部<b>地址栏</b>（或按 Alt+D），复制完整路径</li>
+                        <li>粘贴到下方输入框中</li>
+                    </ol>
+                </div>
+                `,
+                "设置本地路径映射",
+                {
+                  confirmButtonText: "保存",
+                  cancelButtonText: "取消",
+                  inputValue: localRootPath.value,
+                  inputPlaceholder: "粘贴路径，例如: E:\\projects\\WFGameAI",
+                  dangerouslyUseHTMLString: true,
+                  inputPattern: /.+/,
+                  inputErrorMessage: '路径不能为空',
+                  closeOnClickModal: false
+                }
+              );
+
+              if (value) {
+                let cleanPath = value.trim();
+                cleanPath = cleanPath.replace(/\//g, "\\");
+                if (cleanPath.endsWith("\\")) {
+                  cleanPath = cleanPath.slice(0, -1);
+                }
+                
+                localRootPath.value = cleanPath;
+                try {
+                    localStorage.setItem(LOCAL_ROOT_KEY, cleanPath);
+                } catch (e) {}
+                ElementPlus.ElMessage.success("本地路径已保存");
+              }
+            } catch (e) {
+            }
+          };
+
+          const copyText = (text) => {
+              const fallbackCopy = (text) => {
+                  const textArea = document.createElement("textarea");
+                  textArea.value = text;
+                  textArea.style.position = "fixed";
+                  textArea.style.left = "-9999px";
+                  document.body.appendChild(textArea);
+                  textArea.focus();
+                  textArea.select();
+                  try {
+                      document.execCommand('copy');
+                      ElementPlus.ElMessage.success({
+                        message: "命令已复制！请按 Win+R，粘贴并回车",
+                        duration: 4000,
+                        showClose: true
+                      });
+                  } catch (err) {
+                      ElementPlus.ElMessage.error('复制失败，请手动复制');
+                  }
+                  document.body.removeChild(textArea);
+              }
+
+              if (navigator.clipboard && window.isSecureContext) {
+                  navigator.clipboard.writeText(text).then(() => {
+                      ElementPlus.ElMessage.success({
+                        message: "命令已复制！请按 Win+R，粘贴并回车",
+                        duration: 4000,
+                        showClose: true
+                      });
+                  }).catch(() => {
+                      fallbackCopy(text);
+                  });
+              } else {
+                  fallbackCopy(text);
+              }
+          };
+
+          const handleCopyLocalCommand = (imagePath) => {
+            if (!localRootPath.value) {
+              ElementPlus.ElMessage.warning("请先点击右侧齿轮设置本地根目录");
+              handleSetLocalRoot();
+              return;
+            }
+            // 数据库记录的原始路径示例
+            // ocr/repositories/CardGame2/Client/assets/_ResStatic/SpriteFrame/ye1.png
+            // 移除前3级目录，得到图片相对仓库 Root 的相对路径：Client/assets/_ResStatic/SpriteFrame/ye1.png
+            let normRel = imagePath;
+            const parts = normRel.split('/');
+            if (parts.length > 3) {
+                normRel = parts.slice(3).join('/');
+            }
+            normRel = normRel.replace(/\//g, "\\");
+            if (normRel.startsWith("\\")) normRel = normRel.slice(1);
+
+            const fullPath = `${localRootPath.value}\\${normRel}`;
+            const command = `explorer /select, "${fullPath}"`;
+
+            copyText(command);
+          };
+
+          onMounted(() => {
+              ElementPlus.ElNotification({
+                  title: '重要提示：数据保存说明',
+                  message: '由于浏览器安全限制，您在此页面所做的修改（如标记是否翻译、填写翻译文本等）无法直接保存到当前文件。请务必在操作完成后，点击右上角的【保存更改到文件】按钮下载新文件，否则关闭页面后数据将丢失。',
+                  type: 'warning',
+                  duration: 0,
+                  position: 'top-right',
+                  offset: 50
+              });
+          });
+
           return {
             task,
             exportFilterData,
@@ -555,6 +797,7 @@
             pagination,
             paginatedResults,
             showFilterInfo,
+            counts,
             Search, RefreshLeft,
             handleSearch,
             handleReset,
@@ -566,7 +809,10 @@
             isNoTranslation,
             formatTime,
             formatFilterValue,
-            getResultTypeLabel
+            getResultTypeLabel,
+            handleSetLocalRoot,
+            handleCopyLocalCommand,
+            FolderOpened, Setting
           };
         }
       };
