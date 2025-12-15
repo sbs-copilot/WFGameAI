@@ -120,7 +120,7 @@ import { ElImageViewer, ElMessage } from "element-plus";
 import { Edit, Delete, Plus } from "@element-plus/icons-vue";
 import { type OcrResult, ocrResultApi } from "@/api/ocr";
 import { ocrResultTypeEnum } from "@/utils/enums";
-import { mediaUrl } from "@/api/utils";
+import { ocrImageUrl } from "@/api/utils";
 import { superRequest } from "@/utils/request";
 
 const props = defineProps<{
@@ -148,7 +148,7 @@ const tempEditText = ref("");
 // 计算属性
 const urlList = computed(() => {
   if (!props.result) return [];
-  return [mediaUrl(props.result.image_path)];
+  return [ocrImageUrl(props.result.image_hash)];
 });
 
 const panelTitle = computed(() => {

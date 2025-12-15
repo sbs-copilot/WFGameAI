@@ -33,6 +33,9 @@ from .services.compare_service import TransRepoConfig
 from .serializers import OCRTaskSerializer, OCRResultSerializer
 from enum import Enum
 
+from apps.notifications.services import send_message, SSEEvent
+
+
 class BaseEnum(Enum):
     def __new__(cls, value, label, order, type=None, color=None):
         obj = object.__new__(cls)
@@ -717,6 +720,14 @@ def process_ocr_task(task_id):
         OCRCache.record_cache(task_id)
 
 
+        # 将任务结果中的每个图片上传到 minio
+        notify_ocr_task_progress({
+            "id": task_id,
+            "remark": f"正在上传OCR结果图片到存储服务...",
+        })
+        OCRTask.upload_images_to_minio(task_id, include_cache_hits=False)
+
+
         # 生成汇总报告
         notify_ocr_task_progress({
             "id": task_id,
@@ -1343,12 +1354,12 @@ def export_offline_html_task(task_id: str, filter_data: dict = None, file_name: 
         logger.info(f"离线报告生成成功: {file_path}")
         
         # 发送通知（可选，如果前端通过轮询或SSE接收）
-        notify_ocr_task_progress({
-            "id": task_id,
-            "offline_report_url": f"/media/ocr/reports/{file_name}",
+        send_message({
+            "task_id": task_id,
+            "url": f"ocr/reports/{file_name}",
             "msg": "离线报告生成成功"
-        })
-        
+        }, SSEEvent.OCR_REPORT_EXPORT.value)
+
     except Exception as e:
         logger.error(f"导出离线报告失败: {e}")
         logger.error(traceback.format_exc())

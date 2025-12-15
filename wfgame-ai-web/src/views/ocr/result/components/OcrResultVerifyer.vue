@@ -180,7 +180,7 @@ import {
   type TaskGetDetailsParams
 } from "@/api/ocr";
 import { ocrResultTypeEnum } from "@/utils/enums";
-import { mediaUrl } from "@/api/utils";
+import { ocrImageUrl } from "@/api/utils";
 
 const props = defineProps<{
   taskId: string;
@@ -214,7 +214,7 @@ const tempEditText = ref("");
 
 // 计算属性
 const urlList = computed(() =>
-  results.value.map(item => mediaUrl(item.image_path))
+  results.value.map(item => ocrImageUrl(item.image_hash))
 );
 const currentResult = computed(() => results.value[currentIndex.value]);
 const currentDisplayTexts = computed(() => {

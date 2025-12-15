@@ -2,6 +2,8 @@
 OCR模块数据模型
 """
 import difflib
+import os
+from typing import Optional
 
 from django.db import models
 from django.db.models import Q
@@ -10,7 +12,9 @@ import datetime
 from django.db.models import QuerySet
 
 from apps.core.models.common import CommonFieldsMixin
+from utils.minio_helper import batch_upload_file_deduplicated
 from django.db import transaction
+from django.conf import settings
 
 
 def generate_task_id():
@@ -239,6 +243,32 @@ class OCRTask(CommonFieldsMixin):
             
         if updates:
             OCRResult.objects.bulk_update(updates, fields=['similarity_score', 'ground_truth_origin_id'])
+
+    @staticmethod
+    def upload_images_to_minio(task_id: str, include_cache_hits: bool = False) -> dict:
+        """
+        上传OCR任务的图片到MinIO存储
+        :param task_id: OCR任务ID
+        :param include_cache_hits: 是否包含缓存命中的结果图片
+        """
+        task: Optional[OCRTask] = OCRTask.objects.all_teams().filter(id=task_id).first()
+        if not task:
+            raise ValueError(f"OCR Task with ID {task_id} not found.")
+
+        bucket = settings.CFG.get("minio", "default_bucket", "wfgame-ai")
+        minio_dir = "ocr_images"
+
+        if include_cache_hits:
+            results = task.related_results.only("image_path", "image_hash")
+        else:
+            results = task.results.for_team(task.team_id).only("image_path", "image_hash")
+
+        to_uploads = [
+            (os.path.join(settings.MEDIA_ROOT, result.image_path), f"{minio_dir}/{result.image_hash}")
+            for result in results
+        ]
+
+        return batch_upload_file_deduplicated(bucket, to_uploads)
 
 
 

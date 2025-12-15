@@ -179,6 +179,87 @@ class CloneResult:
     message: Optional[str] = None
 
 
+def parse_gitlab_url(repo_url: str) -> Tuple[str, str]:
+    """
+    静态方法：解析GitLab仓库URL，支持SSH和HTTPS两种格式
+
+    Args:
+        repo_url: 仓库URL，支持格式：
+                 - SSH: git@hostname:namespace/project.git
+                 - HTTPS: https://hostname/namespace/project.git
+
+    Returns:
+        (gitlab_host, project_path)
+    """
+    try:
+        # 移除.git后缀
+        if repo_url.endswith(".git"):
+            repo_url = repo_url[:-4]
+
+        # 检查是否为SSH格式 (git@hostname:namespace/project)
+        if repo_url.startswith("git@"):
+            # SSH格式解析: git@hostname:namespace/project
+            # 提取主机名和路径
+            ssh_pattern = r"git@([^:]+):(.+)"
+            match = re.match(ssh_pattern, repo_url)
+            if not match:
+                raise ValueError("无效的SSH格式")
+
+            hostname = match.group(1)
+            project_path = match.group(2)
+            gitlab_host = f"https://{hostname}"
+
+            # 验证项目路径格式 (应该至少包含 namespace/project)
+            path_parts = project_path.split("/")
+            if len(path_parts) < 2:
+                raise ValueError("项目路径格式错误，应为 namespace/project")
+
+            # SSH格式保持完整路径，但至少取最后两部分
+            if len(path_parts) >= 2:
+                project_path = "/".join(path_parts[-2:])
+
+            return gitlab_host, project_path
+
+        # HTTPS格式解析
+        else:
+            parsed = urlparse(repo_url)
+            if not parsed.scheme or not parsed.netloc:
+                raise ValueError("无效的HTTPS URL格式")
+
+            gitlab_host = f"{parsed.scheme}://{parsed.netloc}"
+
+            # 提取项目路径
+            path_parts = parsed.path.strip("/").split("/")
+            if len(path_parts) < 2:
+                raise ValueError("项目路径格式错误，应为 namespace/project")
+
+            # 取最后两部分作为项目路径 (namespace/project)
+            project_path = "/".join(path_parts[-2:])
+            return gitlab_host, project_path
+
+    except Exception as e:
+        logger.error(f"解析项目信息失败: {e}")
+        raise ValueError(f"无效的GitLab URL: {repo_url}")
+
+def get_repo_name(repo_url: str) -> str:
+    """
+    从仓库URL中提取仓库名称
+
+    Args:
+        repo_url: 仓库URL
+
+    Returns:
+        仓库名称
+    """
+    try:
+        project_host, project_path = parse_gitlab_url(repo_url)
+        repo_name = project_path.split('/')[-1]
+        return repo_name
+    except Exception as e:
+        logger.error(f"从仓库URL提取名称失败: {e}")
+        return ""
+
+
 class GitLabService:
     """
     企业级GitLab服务类
@@ -214,66 +295,7 @@ class GitLabService:
 
     @staticmethod
     def parse_gitlab_url(repo_url: str) -> Tuple[str, str]:
-        """
-        静态方法：解析GitLab仓库URL，支持SSH和HTTPS两种格式
-
-        Args:
-            repo_url: 仓库URL，支持格式：
-                     - SSH: git@hostname:namespace/project.git
-                     - HTTPS: https://hostname/namespace/project.git
-
-        Returns:
-            (gitlab_host, project_path)
-        """
-        try:
-            # 移除.git后缀
-            if repo_url.endswith(".git"):
-                repo_url = repo_url[:-4]
-
-            # 检查是否为SSH格式 (git@hostname:namespace/project)
-            if repo_url.startswith("git@"):
-                # SSH格式解析: git@hostname:namespace/project
-                # 提取主机名和路径
-                ssh_pattern = r"git@([^:]+):(.+)"
-                match = re.match(ssh_pattern, repo_url)
-                if not match:
-                    raise ValueError("无效的SSH格式")
-
-                hostname = match.group(1)
-                project_path = match.group(2)
-                gitlab_host = f"https://{hostname}"
-
-                # 验证项目路径格式 (应该至少包含 namespace/project)
-                path_parts = project_path.split("/")
-                if len(path_parts) < 2:
-                    raise ValueError("项目路径格式错误，应为 namespace/project")
-
-                # SSH格式保持完整路径，但至少取最后两部分
-                if len(path_parts) >= 2:
-                    project_path = "/".join(path_parts[-2:])
-
-                return gitlab_host, project_path
-
-            # HTTPS格式解析
-            else:
-                parsed = urlparse(repo_url)
-                if not parsed.scheme or not parsed.netloc:
-                    raise ValueError("无效的HTTPS URL格式")
-
-                gitlab_host = f"{parsed.scheme}://{parsed.netloc}"
-
-                # 提取项目路径
-                path_parts = parsed.path.strip("/").split("/")
-                if len(path_parts) < 2:
-                    raise ValueError("项目路径格式错误，应为 namespace/project")
-
-                # 取最后两部分作为项目路径 (namespace/project)
-                project_path = "/".join(path_parts[-2:])
-                return gitlab_host, project_path
-
-        except Exception as e:
-            logger.error(f"解析项目信息失败: {e}")
-            raise ValueError(f"无效的GitLab URL: {repo_url}")
+        return parse_gitlab_url(repo_url)
 
     def _create_session(self) -> requests.Session:
         """创建HTTP会话"""
@@ -1687,22 +1709,7 @@ class GitLabService:
             return str(repo_dir)
 
     def get_repo_name(self, repo_url: str) -> str:
-        """
-        从仓库URL中提取仓库名称
-
-        Args:
-            repo_url: 仓库URL
-
-        Returns:
-            仓库名称
-        """
-        try:
-            project_host, project_path = self.parse_gitlab_url(repo_url)
-            repo_name = project_path.split('/')[-1]
-            return repo_name
-        except Exception as e:
-            logger.error(f"从仓库URL提取名称失败: {e}")
-            return ""
+        return get_repo_name(repo_url)
 
     def get_repository_directories(
         self, branch: str = "main", path: str = ""

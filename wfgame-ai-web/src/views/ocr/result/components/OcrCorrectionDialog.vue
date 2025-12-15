@@ -12,11 +12,11 @@
     <div class="correction-dialog-body" v-if="result">
       <div class="dialog-left">
         <el-image
-          :src="mediaUrl(result.image_path)"
+          :src="ocrImageUrl(result.image_hash)"
           fit="contain"
           class="dialog-image"
           hide-on-click-modal
-          :preview-src-list="[mediaUrl(result.image_path)]"
+          :preview-src-list="[ocrImageUrl(result.image_hash)]"
         >
           <template #error>
             <div class="image-slot">
@@ -85,7 +85,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from "vue";
 import { type OcrResult, ocrResultApi } from "@/api/ocr";
-import { mediaUrl } from "@/api/utils";
+import { ocrImageUrl } from "@/api/utils";
 import { superRequest } from "@/utils/request";
 import { Picture as IconPicture } from "@element-plus/icons-vue";
 
