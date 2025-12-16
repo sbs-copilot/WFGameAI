@@ -108,9 +108,16 @@ class AdaptiveThresholdManager:
             print("⚠️ 执行时间无效，跳过性能记录")
             return
 
-        # 计算性能指标（设备数/执行时间）
-        performance_score = device_count / execution_time
-        normalized_score = min(performance_score / 10, 1.0)  # 归一化到0-1
+        # 计算性能指标：基于每设备平均耗时
+        # 假设理想情况下每设备执行时间为30秒
+        # 性能得分 = 理想时间 / 实际平均时间
+        ideal_time_per_device = 30.0  # 理想的每设备执行时间（秒）
+        actual_time_per_device = execution_time / device_count if device_count > 0 else execution_time
+        
+        # 性能得分：实际时间越短，得分越高
+        # 归一化到0-1范围：理想时间/实际时间，但限制在0-1之间
+        performance_score = ideal_time_per_device / actual_time_per_device
+        normalized_score = min(max(performance_score, 0.0), 1.0)
 
         self.performance_history.append(normalized_score)
 
@@ -118,7 +125,7 @@ class AdaptiveThresholdManager:
         if len(self.performance_history) > self.max_history_size:
             self.performance_history.pop(0)
 
-        print(f"📈 记录性能数据: {device_count}设备/{execution_time:.2f}秒 = {normalized_score:.3f}")
+        print(f"📈 记录性能数据: {device_count}设备/{execution_time:.2f}秒, 平均{actual_time_per_device:.2f}秒/设备, 性能得分={normalized_score:.3f}")
 
         # 保存配置
         self._save_config()

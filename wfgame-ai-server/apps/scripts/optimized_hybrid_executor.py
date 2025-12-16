@@ -440,13 +440,15 @@ class OptimizedHybridExecutor:
 
             # 使用原始设备列表执行（全或无已保证全部分配）
             device_count = len(device_serials)
+            
+            # 根据阈值选择执行策略
             if device_count <= optimal_threshold:
-                # 无限制并发执行
-                print(f"🚀 执行策略：无限制并发执行")
+                # 无限制并发执行（设备数量在阈值范围内）
+                print(f"🚀 执行策略：无限制并发执行（设备数 {device_count} ≤ 阈值 {optimal_threshold}）")
                 result = self._unlimited_execution(device_serials, scripts, account_allocations, task_id=task_id)
             else:
-                # 智能动态管理
-                print(f"⚙️ 执行策略：智能动态管理")
+                # 智能动态管理（设备数量超过阈值，需要分批执行）
+                print(f"⚙️ 执行策略：智能动态管理（设备数 {device_count} > 阈值 {optimal_threshold}，分批执行）")
                 result = self._intelligent_execution(device_serials, scripts, account_allocations, task_id=task_id)
 
             execution_time = time.time() - start_time

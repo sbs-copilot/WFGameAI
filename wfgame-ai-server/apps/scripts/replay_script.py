@@ -345,6 +345,7 @@ class StepTracker:
         failed_all = 0
 
         # 优先使用 Redis 原子计数（更可靠，避免跨进程重复统计或遗漏）
+        redis_has_data = False  # 标记Redis是否有原子计数数据
         if self.redis_client and self.task_id:
             try:
                 completed_key = f"wfgame:replay:task:{self.task_id}:completed_total"
@@ -352,7 +353,8 @@ class StepTracker:
                 failed_key = f"wfgame:replay:task:{self.task_id}:failed_total"
                 
                 val = self.redis_client.get(completed_key)
-                if val:
+                if val is not None:  # 修复：区分"返回0"和"没有数据"
+                    redis_has_data = True
                     try:
                         completed_all = int(val)
                     except Exception:
@@ -360,21 +362,21 @@ class StepTracker:
                 
                 # 读取成功和失败计数
                 val_success = self.redis_client.get(success_key)
-                if val_success:
+                if val_success is not None:
                     try:
                         success_all = int(val_success)
                     except Exception:
                         success_all = 0
                 
                 val_failed = self.redis_client.get(failed_key)
-                if val_failed:
+                if val_failed is not None:
                     try:
                         failed_all = int(val_failed)
                     except Exception:
                         failed_all = 0
                 
-                # 如果没有原子计数，回退到按设备计数
-                if completed_all == 0:
+                # 如果Redis没有原子计数数据，回退到按设备计数
+                if not redis_has_data:
                     pattern = f"wfgame:replay:task:{self.task_id}:device:*:steps"
                     for key in self.redis_client.scan_iter(match=pattern):
                         try:
@@ -400,12 +402,13 @@ class StepTracker:
                             continue
             except Exception:
                 # Redis 失败时回退到仅计算本地
+                redis_has_data = False
                 completed_all = 0
                 success_all = 0
                 failed_all = 0
 
         # 如果 Redis 没有数据或不可用，则回退到本地计算（至少包含当前设备）
-        if completed_all == 0:
+        if not redis_has_data and completed_all == 0:
             try:
                 for rec in self.records:
                     for s in rec.get('steps', []) or []:
@@ -662,9 +665,12 @@ class StepTracker:
             progress_percentage = round((completed_steps / calculated_total_steps) * 100, 2) if calculated_total_steps > 0 else 0
             payload = {
                 "script": int(script_id) if script_id is not None else None,
-                "progress": progress_percentage,
-                "completed_steps": completed_steps,
-                "total_steps": calculated_total_steps,
+                "percent": progress_percentage,  # Socket服务器要求的字段
+                "progress": progress_percentage,  # 兼容前端
+                "current": completed_steps,  # 前端需要的字段：当前已完成步数
+                "completed_steps": completed_steps,  # 兼容旧字段
+                "total": calculated_total_steps,  # 前端需要的字段：总步数
+                "total_steps": calculated_total_steps,  # 兼容旧字段
                 "success_steps": success_steps,
                 "failed_steps": failed_steps,
                 "online_devices": GLOBAL_INITIAL_DEVICE_COUNT or 1,
@@ -689,14 +695,9 @@ class StepTracker:
         """向 socket 房间推送单步事件（实时单步骤）。
 
         改动：附带该步骤的开始/结束时间与显示状态，并提供与快照结构一致的 result 嵌套。
-        新规范：仅“主设备"(primary device) 推送步骤事件，其它设备不推此事件；主设备为第一个开始执行脚本的设备。
+        修复：所有设备都推送步骤事件，但在payload中包含设备信息，让前端能够区分不同设备的步骤。
         """
         try:
-            # 确保主设备已初始化
-            self._ensure_primary_device()
-            # 仅主设备推送步骤事件
-            if not self._is_primary_device():
-                return
             client = _get_socket_client()
             if not client:
                 print_realtime("⚠️ Socket 客户端不可用，跳过步骤事件推送")
@@ -707,10 +708,14 @@ class StepTracker:
             display_status = display
             _nested_status = nested_status
 
-            completed_global, total_global, percent_global, success_global, failed_global = self._compute_task_progress()
-            if getattr(self, '_cached_total_steps', None) and self._cached_total_steps:
-                total_global = int(self._cached_total_steps)
-                percent_global = int(round((completed_global / total_global) * 100)) if total_global > 0 else percent_global
+            # 修复根本问题：step事件不推送全局进度，避免时序问题
+            # 因为单个step完成时，其他设备可能还在执行，全局进度不准确
+            # 全局进度统一由finish_script中的progress事件推送
+            completed_global = None
+            total_global = None
+            percent_global = None
+            success_global = None
+            failed_global = None
 
             if self.records:
                 try:
@@ -727,7 +732,9 @@ class StepTracker:
                 except Exception:
                     pass
             # 最小化负载：仅保留脚本ID、步骤索引、状态、显示状态、开始/结束时间、成功失败统计
+            # 修复：添加设备信息，让前端能够区分不同设备的步骤
             payload = {
+                "device": str(self.device_serial),  # 添加设备序列号
                 "script": int(script_id) if script_id is not None else None,
                 "step_index": int(step_index),
                 "total_steps": total_global,
@@ -1013,20 +1020,18 @@ class StepTracker:
             track_error(f"⚠️ Redis进度更新失败: {e}")
 
         self._flush_to_redis()
-        # 推送单步“完成/失败”事件（仅主设备）
+        # 推送单步"完成/失败"事件（所有设备都推送，确保前端能看到所有设备的步骤）
         try:
-            if self._is_primary_device():
-                self._push_step_event(
-                    script_id=rec.get("meta", {}).get("id"),
-                    step_index=step_index,
-                    status=("success" if success else "failed"),
-                    start_time=res.get('start_time'),
-                    end_time=res.get('end_time'),
-                    display=res.get('display_status'),
-                    nested_status=res.get('status')
-                )
-                # 同步推送任务级进度（每步更新一次，减少前端延迟）
-                # 不再推送 progress；前端自行根据 step 汇总
+            # 修复：移除主设备判断，所有设备都推送自己的步骤事件
+            self._push_step_event(
+                script_id=rec.get("meta", {}).get("id"),
+                step_index=step_index,
+                status=("success" if success else "failed"),
+                start_time=res.get('start_time'),
+                end_time=res.get('end_time'),
+                display=res.get('display_status'),
+                nested_status=res.get('status')
+            )
             # 推送设备截图事件（所有设备，只在有图时）
             if (res.get('local_pic_pth') or res.get('oss_pic_pth')) and _get_socket_client():
                 # 新规范：不再推送 device_image；统一由 device_<pk> 房间 frame 事件承担
@@ -1089,6 +1094,116 @@ class StepTracker:
         except Exception:
             pass
 
+    def _push_final_screenshot(self):
+        """推送脚本结束时的最终截图，确保前端显示最新界面状态"""
+        try:
+            print_realtime(f"📸 [Task-{self.task_id} Dev-{self.device_serial}] 获取并推送最终截图")
+            
+            # 修复：使用绝对导入，避免多进程/线程环境下相对导入失败
+            from apps.scripts.action_processor import get_device_screenshot
+            
+            # 获取设备连接 - 支持多种来源
+            device = None
+            
+            # 方法1：从实例属性获取
+            device = getattr(self, '_device_connection', None) or getattr(self, 'device', None)
+            
+            # 方法2：尝试重新建立设备连接
+            if not device:
+                try:
+                    from ppadb.client import Client as AdbClient
+                    client = AdbClient(host="127.0.0.1", port=5037)
+                    device = client.device(self.device_serial)
+                except Exception as e:
+                    print_realtime(f"❌ 无法连接设备 {self.device_serial}: {e}")
+                    
+            # 方法3：尝试从全局设备管理器获取（如果存在）
+            if not device:
+                try:
+                    # 这个方法需要根据实际的设备管理实现来调整
+                    pass
+                except Exception:
+                    pass
+            
+            if device:
+                # 获取最终截图
+                screenshot_pil = get_device_screenshot(device)
+                if screenshot_pil:
+                    # 保存截图到报告目录
+                    timestamp_ms = int(time.time() * 1000)
+                    screenshot_name = f"final_{timestamp_ms}.jpg"
+                    
+                    if hasattr(self, 'device_report_dir') and self.device_report_dir:
+                        screenshot_path = os.path.join(str(self.device_report_dir), screenshot_name)
+                        try:
+                            from PIL import Image
+                            
+                            # 如果图像是RGBA模式，转换为RGB模式以支持JPEG保存
+                            if screenshot_pil.mode == 'RGBA':
+                                # 创建白色背景
+                                rgb_image = Image.new('RGB', screenshot_pil.size, (255, 255, 255))
+                                # 将RGBA图像粘贴到白色背景上
+                                rgb_image.paste(screenshot_pil, mask=screenshot_pil.split()[3])  # 使用alpha通道作为mask
+                                screenshot_pil = rgb_image
+                            elif screenshot_pil.mode not in ('RGB', 'L'):
+                                # 其他模式也转换为RGB
+                                screenshot_pil = screenshot_pil.convert('RGB')
+                            
+                            screenshot_pil.save(screenshot_path, "JPEG", quality=85)
+                            print_realtime(f"✅ 最终截图保存成功: {screenshot_path}")
+                            
+                            # 推送截图到前端
+                            self._push_screenshot_to_frontend(screenshot_path)
+                            
+                        except Exception as save_err:
+                            print_realtime(f"❌ 保存最终截图失败: {save_err}")
+                    else:
+                        print_realtime("⚠️ 设备报告目录未设置，无法保存最终截图")
+                else:
+                    print_realtime("❌ 获取最终截图失败")
+            else:
+                print_realtime("❌ 设备连接不可用，无法获取最终截图")
+                
+        except Exception as e:
+            print_realtime(f"❌ 推送最终截图异常: {e}")
+
+    def _push_screenshot_to_frontend(self, screenshot_path):
+        """推送截图到前端"""
+        try:
+            if os.path.isfile(screenshot_path):
+                with open(screenshot_path, 'rb') as f:
+                    b64 = base64.b64encode(f.read()).decode('utf-8')
+                    
+                client = _get_socket_client()
+                if client and b64:
+                    # 获取设备房间名
+                    room_dev_pk = None
+                    try:
+                        if Device:
+                            dev_obj = Device.objects.filter(device_id=self.device_serial).only('id', 'device_id').first()
+                            if dev_obj:
+                                room_dev_pk = f"device_{dev_obj.id}".strip()
+                    except Exception as room_err:
+                        track_error(f"⚠️ 查询设备ID用于房间名失败: {room_err}")
+                    
+                    # 推送到设备房间
+                    if room_dev_pk:
+                        try:
+                            _ = client.emit(room=room_dev_pk, module='replay', event='frame', data=b64)
+                            print_realtime(f"✅ 最终截图已推送到前端房间: {room_dev_pk}")
+                        except Exception as push_err:
+                            track_error(f"⚠️ 推送最终截图到 {room_dev_pk} 失败: {push_err}")
+                    
+                    # 兼容性：同时推送到序列号房间
+                    room_dev_serial = f"device_{self.device_serial}".strip()
+                    try:
+                        _ = client.emit(room=room_dev_serial, module='replay', event='frame', data=b64)
+                    except Exception:
+                        pass  # 兼容性推送，失败不报错
+                        
+        except Exception as e:
+            print_realtime(f"❌ 推送截图到前端失败: {e}")
+
     def finish_script(self, *, final: bool = True):
         if not self.records:
             return
@@ -1104,7 +1219,16 @@ class StepTracker:
             if client and self._is_primary_device():
                 # 计算实际的已完成步数和成功失败统计
                 completed_actual, total_actual, percent_actual, success_actual, failed_actual = self._compute_task_progress()
-                print_realtime(f"🏁 [Task-{self.task_id} Dev-{self.device_serial}] 脚本结束，推送实际进度: {completed_actual}/{total_actual} ({percent_actual}%) 成功:{success_actual} 失败:{failed_actual}")
+                
+                # 区分任务维度和设备维度的进度
+                device_count = GLOBAL_INITIAL_DEVICE_COUNT or 1
+                single_device_steps = GLOBAL_REPLAY_SINGLE_DEVICE_STEPS or len(rec.get("steps", []))
+                
+                print_realtime(f"🏁 [Task-{self.task_id} Dev-{self.device_serial}] 当前设备脚本结束")
+                print_realtime(f"   📊 任务维度进度: {completed_actual}/{total_actual} ({percent_actual}%) - 所有设备聚合进度")
+                print_realtime(f"   📱 设备维度进度: 本设备完成 {single_device_steps} 步，共 {device_count} 台设备")
+                print_realtime(f"   ✅ 成功: {success_actual} | ❌ 失败: {failed_actual}")
+                
                 # 推送实际进度（不强制100%，使用真实数据）
                 self._push_progress_event(
                     script_id=rec.get("meta", {}).get("id"),
@@ -1113,6 +1237,10 @@ class StepTracker:
                     success_steps=success_actual,
                     failed_steps=failed_actual
                 )
+            
+            # 修复：所有设备都推送自己的最终截图，不限于主设备
+            # 确保每个设备执行完成后都能在前端显示最新界面状态
+            self._push_final_screenshot()
         except Exception as _pe:
             track_error(f"⚠️ 任务完成状态推送异常: {_pe}")
 
@@ -1850,7 +1978,22 @@ def perform_fullscreen_ocr_detection(frame, ocr_keywords=None, ocr_min_score=0.5
         # 导入关键字过滤器
         from apps.ocr.services.keyword_filter import KeywordFilter
         
-        # 查找匹配关键字的文本
+        # 修复：使用最佳匹配策略（收集所有匹配项，选择质量最高的）
+        keyword_filter_config = {
+            "enabled": True,
+            "keywords": ocr_keywords,
+            "fuzzy_match": True,
+            "fuzzy_similarity": 0.80,
+            "ignore_case": True,
+            "ignore_spaces": True,
+            "ignore_digits": False,
+            "min_confidence": ocr_min_score
+        }
+        
+        keyword_filter = KeywordFilter(keyword_filter_config)
+        matches = []
+        
+        # 查找所有匹配关键字的文本
         for i, text in enumerate(texts):
             if not text or not text.strip():
                 continue
@@ -1888,85 +2031,110 @@ def perform_fullscreen_ocr_detection(frame, ocr_keywords=None, ocr_min_score=0.5
                 filtered_results = keyword_filter.filter_results(ocr_results)
                 
                 if len(filtered_results) > 0:
-                    # 找到匹配的文本,计算中心坐标
+                    # 找到匹配的文本，添加到候选列表
                     polygon = polygons[i] if i < len(polygons) else []
                     if polygon:
-                        # 调试: 对比dt_polys和rec_polys
-                        dt_poly = dt_polys[i] if i < len(dt_polys) else None
-                        rec_poly = rec_polys[i] if i < len(rec_polys) else None
-                        
-                        if dt_poly and rec_poly:
-                            print_realtime(f"🔍 调试 - dt_polys[{i}]: {dt_poly}")
-                            print_realtime(f"🔍 调试 - rec_polys[{i}]: {rec_poly}")
-                        
-                        # 调试: 输出polygon原始数据
-                        print_realtime(f"🔍 调试 - 使用的Polygon坐标: {polygon}")
-                        
-                        # 计算多边形边界框
-                        x_coords = [p[0] for p in polygon]
-                        y_coords = [p[1] for p in polygon]
-                        x_min, x_max = min(x_coords), max(x_coords)
-                        y_min, y_max = min(y_coords), max(y_coords)
-                        
-                        print_realtime(f"🔍 调试 - 边界框: x=[{x_min}, {x_max}], y=[{y_min}, {y_max}]")
-                        
-                        # 默认使用边界框中心
-                        x = int((x_min + x_max) / 2)
-                        y = int((y_min + y_max) / 2)
-                        
-                        print_realtime(f"🔍 调试 - 计算中心点: ({x}, {y})")
-                        
-                        # 如果文本包含关键字但不完全匹配,尝试估算关键字位置
                         text_stripped = text.strip()
                         keywords_list = [kw.strip() for kw in ocr_keywords.split(',')]
                         
-                        # 检查是否完全匹配
+                        # 计算匹配质量评分
+                        match_quality = 0.0
                         exact_match = any(text_stripped == kw for kw in keywords_list)
                         
-                        if not exact_match and len(text_stripped) > 0:
-                            # 文本包含关键字但不完全匹配,尝试定位关键字位置
+                        if exact_match:
+                            match_quality = 1.0  # 完全匹配最高分
+                        else:
+                            # 部分匹配，计算相似度
                             for keyword in keywords_list:
-                                keyword_pos = text_stripped.find(keyword)
-                                if keyword_pos >= 0:
-                                    # 计算关键字在文本中的相对位置(0.0-1.0)
-                                    text_len = len(text_stripped)
-                                    keyword_len = len(keyword)
-                                    # 关键字中心位置的相对坐标
-                                    relative_pos = (keyword_pos + keyword_len / 2) / text_len
-                                    
-                                    # 调整X坐标到关键字位置
-                                    text_width = x_max - x_min
-                                    x = int(x_min + text_width * relative_pos)
-                                    
-                                    print_realtime(f"📍 关键字 '{keyword}' 在文本 '{text_stripped}' 中的位置: {keyword_pos}/{text_len}, 调整X坐标: {x}")
-                                    break
+                                if keyword in text_stripped:
+                                    # 基于关键字长度占比计算质量
+                                    match_quality = max(match_quality, len(keyword) / len(text_stripped))
                         
-                        print_realtime(f"✅ 全屏OCR找到匹配文本: {text} (置信度: {score:.2f}) 位置: ({x}, {y})")
-                        
-                        return True, {
-                            "position": (x, y),
-                            "text": text.strip(),
+                        matches.append({
+                            "index": i,
+                            "text": text_stripped,
                             "score": score,
-                            "polygon": polygon
-                        }
-            else:
-                # 没有指定关键字,返回第一个高置信度文本
-                polygon = polygons[i] if i < len(polygons) else []
-                if polygon:
-                    x = int(sum(p[0] for p in polygon) / len(polygon))
-                    y = int(sum(p[1] for p in polygon) / len(polygon))
-                    
-                    print_realtime(f"✅ 全屏OCR找到文本: {text} (置信度: {score:.2f}) 位置: ({x}, {y})")
-                    
-                    return True, {
-                        "position": (x, y),
-                        "text": text.strip(),
-                        "score": score,
-                        "polygon": polygon
-                    }
+                            "polygon": polygon,
+                            "match_quality": match_quality,
+                            "exact_match": exact_match
+                        })
+                        
+                        print_realtime(f"🔍 匹配候选[{i}]: '{text_stripped}' (置信度:{score:.2f}, 匹配质量:{match_quality:.2f}, 完全匹配:{exact_match})")
         
-        print_realtime(f"❌ 全屏OCR未找到匹配关键字的文本: {ocr_keywords}")
-        return False, None
+        # 如果没有匹配项，返回失败
+        if not matches:
+            print_realtime(f"❌ 未找到匹配关键字 '{ocr_keywords}' 的文本")
+            return False, None
+        
+        # 选择最佳匹配：优先完全匹配，然后按匹配质量和置信度排序
+        best_match = max(matches, key=lambda m: (
+            m["exact_match"],      # 完全匹配优先
+            m["match_quality"],    # 匹配质量其次
+            m["score"]             # OCR置信度最后
+        ))
+        
+        print_realtime(f"🎯 从 {len(matches)} 个候选中选择最佳匹配[{best_match['index']}]: '{best_match['text']}'")
+        
+        # 计算最佳匹配的坐标
+        i = best_match["index"]
+        text = best_match["text"]
+        score = best_match["score"]
+        polygon = best_match["polygon"]
+        
+        # 调试: 对比dt_polys和rec_polys
+        dt_poly = dt_polys[i] if i < len(dt_polys) else None
+        rec_poly = rec_polys[i] if i < len(rec_polys) else None
+        
+        if dt_poly and rec_poly:
+            print_realtime(f"🔍 调试 - dt_polys[{i}]: {dt_poly}")
+            print_realtime(f"🔍 调试 - rec_polys[{i}]: {rec_poly}")
+        
+        # 调试: 输出polygon原始数据
+        print_realtime(f"🔍 调试 - 使用的Polygon坐标: {polygon}")
+        
+        # 计算多边形边界框
+        x_coords = [p[0] for p in polygon]
+        y_coords = [p[1] for p in polygon]
+        x_min, x_max = min(x_coords), max(x_coords)
+        y_min, y_max = min(y_coords), max(y_coords)
+        
+        print_realtime(f"🔍 调试 - 边界框: x=[{x_min}, {x_max}], y=[{y_min}, {y_max}]")
+        
+        # 默认使用边界框中心
+        x = int((x_min + x_max) / 2)
+        y = int((y_min + y_max) / 2)
+        
+        print_realtime(f"🔍 调试 - 计算中心点: ({x}, {y})")
+        
+        # 如果文本包含关键字但不完全匹配,尝试估算关键字位置
+        keywords_list = [kw.strip() for kw in ocr_keywords.split(',')]
+        
+        if not best_match["exact_match"] and len(text) > 0:
+            # 文本包含关键字但不完全匹配,尝试定位关键字位置
+            for keyword in keywords_list:
+                keyword_pos = text.find(keyword)
+                if keyword_pos >= 0:
+                    # 计算关键字在文本中的相对位置(0.0-1.0)
+                    text_len = len(text)
+                    keyword_len = len(keyword)
+                    # 关键字中心位置的相对坐标
+                    relative_pos = (keyword_pos + keyword_len / 2) / text_len
+                    
+                    # 调整X坐标到关键字位置
+                    text_width = x_max - x_min
+                    x = int(x_min + text_width * relative_pos)
+                    
+                    print_realtime(f"📍 关键字 '{keyword}' 在文本 '{text}' 中的位置: {keyword_pos}/{text_len}, 调整X坐标: {x}")
+                    break
+        
+        print_realtime(f"✅ 全屏OCR选择最佳匹配: {text} (置信度: {score:.2f}) 位置: ({x}, {y})")
+        
+        return True, {
+            "position": (x, y),
+            "text": text,
+            "score": score,
+            "polygon": polygon
+        }
         
     except Exception as e:
         print_realtime(f"❌ 全屏OCR检测异常: {e}")
@@ -2708,14 +2876,17 @@ def process_sequential_script(device, steps, device_report_dir, action_processor
         step_end_time = time.time()
         step_duration = step_end_time - step_start_time
 
-        # 步骤日志
+        # 步骤结束日志
+        device_serial = getattr(device, 'serial', 'Unknown')
+        print_realtime(f"\n{'-'*80}")
         if success and has_executed:
             has_executed_steps = True
-            print_realtime(f"✅ [步骤 {step_idx+1}] 执行成功 (耗时: {step_duration:.2f}s) - {step_message}")
+            print_realtime(f"✅ [设备 {device_serial}] 步骤 #{step_idx+1} 完成 - 成功 (耗时{step_duration:.2f}s)")
         elif not success and has_executed:
-            print_realtime(f"❌ [步骤 {step_idx+1}] 执行失败 (耗时: {step_duration:.2f}s) - {error_message}")
+            print_realtime(f"❌ [设备 {device_serial}] 步骤 #{step_idx+1} 完成 - 失败 (耗时{step_duration:.2f}s): {error_message}")
         else: # 未执行
-            print_realtime(f"ℹ️ [步骤 {step_idx+1}] 跳过执行 - {step_message}")
+            print_realtime(f"ℹ️ [设备 {device_serial}] 步骤 #{step_idx+1} 跳过")
+        print_realtime(f"{'-'*80}\n")
 
         # 步骤完成：通知 StepTracker
         if step_tracker:
@@ -2896,6 +3067,8 @@ def replay_device(device, scripts, screenshot_queue, action_queue, click_queue, 
     tracker = StepTracker(task_id=int(task_id), device_serial=device.serial if hasattr(device, 'serial') else device_name, device_report_dir=str(device_report_dir)) if task_id is not None else None
     # 对齐远端对象存储目录名与本地目录名，统一为 <serial>_<YYYYMMDD_HHMMSS>
     if tracker is not None:
+        # 修复：添加设备连接对象，确保最终截图功能可用
+        tracker._device_connection = device
         try:
             # 重置运行目录名和URL前缀以与本地一致
             tracker._run_dir_name = f"{serial_base}_{run_ts}"

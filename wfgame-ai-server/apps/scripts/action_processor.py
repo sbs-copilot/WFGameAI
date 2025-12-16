@@ -476,6 +476,38 @@ class ActionProcessor:
             logger.log_step_performance(step_name, self._step_metrics)
             self._step_metrics = {}  # 清空指标
 
+    def _normalize_text(self, txt):
+        """规范化文本：去除空格并转小写，便于严格比较"""
+        if txt is None:
+            return ""
+        s = str(txt)
+        s = s.strip().lower().replace(" ", "")
+        return s
+
+    def _prepare_keywords(self, ocr_keywords):
+        """
+        预处理OCR关键字，返回关键字列表和规范化集合
+        
+        Args:
+            ocr_keywords: 原始关键字字符串（逗号分隔）
+            
+        Returns:
+            tuple: (keywords_list, normalized_keywords)
+                - keywords_list: 关键字列表
+                - normalized_keywords: 规范化后的关键字集合
+        """
+        # 处理关键词列表
+        keywords_list = [
+            k.strip() for k in str(ocr_keywords or "").split(",") if k and k.strip()
+        ]
+        
+        # 规范化关键词集合，用于严格匹配
+        normalized_keywords = set(
+            self._normalize_text(k) for k in keywords_list if k
+        )
+        
+        return keywords_list, normalized_keywords
+
     def _auto_allocate_device_account(self):
         """自动为设备分配账号（智能重试机制）"""
         try:
@@ -559,8 +591,16 @@ class ActionProcessor:
         # 确保每个步骤开始时清空上一次的截图记录，避免把上一步的截图误填到当前步骤
 
         step_action = step.get("action", "click")
-        step_yolo_class = step.get("yolo_class")  # 修复: 确保step_yolo_class已定义
-        print(f"[DEBUG] _process_action called: step_action={step_action}, step_yolo_class={step_yolo_class}, step_idx={step_idx}")
+        step_yolo_class = step.get("yolo_class", "")  # 修复: 确保step_yolo_class已定义
+        step_remark = step.get("remark", "")
+        
+        # 打印清晰的步骤开始标记
+        device_serial = getattr(self.device, 'serial', 'Unknown')
+        print("\n" + "="*80)
+        print(f"📱 [{device_serial}] 步骤 #{step_idx + 1} | 操作: {step_action}")
+        if step_remark:
+            print(f"📝 {step_remark}")
+        print("="*80)
         
         # 获取重试配置(默认值: max_retries=3, retry_interval=1秒)
         max_retries = step.get("max_retries", 3)
@@ -658,10 +698,26 @@ class ActionProcessor:
             result = self._handle_swipe(step, step_idx)
 
         elif step_action == "input":
-            result = self._handle_input(step, step_idx)
+            # UI输入方式已废弃，请使用 retry_until_success 配合 AI 定位
+            print("❌ 'input' 操作已废弃")
+            print("💡 请使用 'retry_until_success' 操作，配合 'yolo_class' 和 'execute_action=input'")
+            print("   示例: {\"action\": \"retry_until_success\", \"execute_action\": \"input\", \"yolo_class\": \"输入框类别\", \"text\": \"输入内容\"}")
+            result = ActionResult(
+                success=False,
+                message="input操作已废弃，请使用retry_until_success配合AI定位",
+                details={"operation": "input", "error": "deprecated", "suggestion": "use retry_until_success with AI"}
+            )
 
         elif step_action == "checkbox":
-            result = self._handle_checkbox(step, step_idx)
+            # UI checkbox方式已废弃，请使用 AI 点击方式
+            print("❌ 'checkbox' 操作已废弃")
+            print("💡 请使用 'ai_detection_click' 或 'retry_until_success' 操作来点击checkbox")
+            print("   示例: {\"action\": \"ai_detection_click\", \"yolo_class\": \"checkbox类别\"}")
+            result = ActionResult(
+                success=False,
+                message="checkbox操作已废弃，请使用AI检测点击",
+                details={"operation": "checkbox", "error": "deprecated", "suggestion": "use ai_detection_click"}
+            )
 
         elif step_action == "wait_for_disappearance":
             result = self._handle_wait_for_disappearance(step, step_idx, log_dir)
@@ -679,17 +735,6 @@ class ActionProcessor:
             if execute_action:
                 print(f"🎯 检测到组合操作: click + {execute_action}")
                 result = self._handle_click_with_execute_action(step, step_idx, log_dir)
-            elif "target_selector" in step:
-                # 处理 target_selector 逻辑
-                converted_step = step.copy()
-                target_selector = converted_step["target_selector"]
-                # 尝试从target_selector提取参数
-
-                if target_selector.get("type"):
-                    converted_step["ui_type"] = target_selector["type"]
-                    converted_step["detection_method"] = "ui"
-                del converted_step["target_selector"]
-                return self._process_action(converted_step, step_idx, log_dir)
             else:
                 # 默认处理：尝试AI检测点击
 
@@ -700,9 +745,11 @@ class ActionProcessor:
                     # 对于Priority模式脚本，如果有yolo_class字段，执行AI检测点击
                     print(f"🎯 检测到yolo_class字段: {step_yolo_class}，执行AI检测点击")
                     result = self._handle_ai_detection_click(step, step_idx, log_dir)
-                elif step_yolo_class and step_yolo_class != "fallback_click":
+                elif step.get("ocr_keywords"):
+                    # 修复：添加OCR检测分支，使用现有的AI检测方法（它已支持OCR）
+                    ocr_keywords = step.get("ocr_keywords")
+                    print(f"🎯 检测到OCR关键字: {ocr_keywords}，执行OCR检测点击")
                     result = self._handle_ai_detection_click(step, step_idx, log_dir)
-
                 else:
                     result = ActionResult(
                         success=False,
@@ -1137,7 +1184,15 @@ class ActionProcessor:
         # 全屏OCR使用更低的默认阈值(0.4)，因为检测范围大、文本可能较小
         ocr_min_score = step.get("ocr_min_score", 0.4)
         step_remark = step.get("remark", "")
+        
+        # 支持灵活的OCR匹配策略
+        ocr_match_method = step.get("ocr_match_method", "best")  # 默认最佳匹配
+        ocr_match_method_desc = step.get("ocr_match_method_desc", "")
+        
         print(f"[OCR模式] 关键字: {ocr_keywords}, 最小置信度: {ocr_min_score} (全屏检测)")
+        print(f"🎯 OCR匹配策略: {ocr_match_method}")
+        if ocr_match_method == "desc" and ocr_match_method_desc:
+            print(f"🎯 位置描述: {ocr_match_method_desc}")
         
         try:
             screenshot = get_device_screenshot(self.device)
@@ -1147,14 +1202,19 @@ class ActionProcessor:
             
             frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
             
-            # 调用replay_script中的全屏OCR检测函数
-            from apps.scripts.replay_script import perform_fullscreen_ocr_detection
-            
-            success, result = perform_fullscreen_ocr_detection(
-                frame,
-                ocr_keywords=ocr_keywords,
-                ocr_min_score=ocr_min_score
-            )
+            # 根据匹配策略调用不同的OCR处理方法
+            if ocr_match_method == "first":
+                success, result = self._ocr_match_first_strategy(frame, ocr_keywords, ocr_min_score)
+            elif ocr_match_method == "desc":
+                success, result = self._ocr_match_desc_strategy(frame, ocr_keywords, ocr_match_method_desc, ocr_min_score)
+            else:
+                # 默认使用最佳匹配策略 (best)
+                from apps.scripts.replay_script import perform_fullscreen_ocr_detection
+                success, result = perform_fullscreen_ocr_detection(
+                    frame,
+                    ocr_keywords=ocr_keywords,
+                    ocr_min_score=ocr_min_score
+                )
             
             timestamp = time.time()
             if success and result:
@@ -1577,38 +1637,37 @@ class ActionProcessor:
                         "app_name": app_identifier
                         },
                     "start_time": timestamp,
-                    "ret": final_result,
+                    "ret": startup_success,
                     "end_time": timestamp + 1
                 }
             }
             # 添加screen对象到日志条目（如果可用）
             if screen_data:
                 app_start_entry["data"]["screen"] = screen_data            # 添加 executed 字段到日志条目
-            app_start_entry["data"]["executed"] = final_result
+            app_start_entry["data"]["executed"] = startup_success
 
             self._write_log_entry(app_start_entry)
 
             # 修复: 根据实际结果返回正确的状态
-            if final_result:
-                print("✅ 应用启动和权限处理都成功")
+            if startup_success:
+                print("✅ 应用启动成功")
                 return ActionResult(
                     success=True,
-                    message="应用启动和权限处理成功",
+                    message="应用启动成功",
                     details={
                         "operation": "app_start",
                         "app_name": app_name,
-                        "package_name": package_name,
-                        "permission_handled": handle_permission
+                        "package_name": package_name
                     }
                 )
             else:
-                print("❌ 应用启动或权限处理失败")
+                print("❌ 应用启动失败")
                 return ActionResult(
                     success=False,
-                    message="应用启动或权限处理失败",
+                    message="应用启动失败",
                     details={
                         "operation": "app_start",
-                        "error": "startup_or_permission_failed"
+                        "error": "startup_failed"
                     }
                 )
 
@@ -1779,7 +1838,11 @@ class ActionProcessor:
 
                     if success and detection_result[0] is not None:
                         element_found = True
-                        x, y, detected_class = detection_result
+                        # 修复：处理返回4个值的情况 (x, y, class, extra)
+                        if len(detection_result) >= 3:
+                            x, y, detected_class = detection_result[0], detection_result[1], detection_result[2]
+                        else:
+                            x, y, detected_class = detection_result[0], detection_result[1], "unknown"
                         print(f"✅ [阶段1-成功] 元素 '{element_class}' 已找到!")
                         print(f"📍 位置: ({x:.1f}, {y:.1f})")
                         print(f"🏷️ 检测类别: {detected_class}")
@@ -2495,30 +2558,38 @@ class ActionProcessor:
             }
 
     def _handle_wait_for_appearance(self, step, step_idx, log_dir):
-        """处理等待元素出现步骤 - 等待指定元素从无到有的出现过程"""
-        # 解析参数，使用新的参数名称
+        """处理等待元素出现步骤 - 使用AI检测等待指定元素出现"""
+        # 解析参数
         yolo_class = step.get("yolo_class", "")
-        ui_type = step.get("ui_type", "")
-        detection_method = step.get("detection_method", "ai" if yolo_class else "ui")
-
         step_remark = step.get("remark", "")
-        max_wait = step.get("max_wait", 10)
+        max_duration = step.get("max_duration", 10)
         polling_interval = step.get("polling_interval", 1)
         confidence = step.get("confidence", 0.8)
         fail_on_timeout = step.get("fail_on_timeout", True)
-        fallback_yolo_class = step.get("fallback_yolo_class", "")
+        # OCR 相关参数
+        ocr_keywords = step.get("ocr_keywords")
+        ocr_min_score = step.get("ocr_min_score", 0.5)
+        ocr_match_method = step.get("ocr_match_method", "best")
+        ocr_match_method_desc = step.get("ocr_match_method_desc", "")
 
-        print(f"\n🚀 [步骤 {step_idx+1}] 开始执行 wait_for_appearance 操作")
-        print(f"📋 检测方式: {detection_method}")
-        if detection_method == "ai" and yolo_class:
-            print(f"🎯 AI类别: '{yolo_class}'")
-        elif detection_method == "ui" and ui_type:
-            print(f"🎯 UI类型: '{ui_type}'")
-        print(f"⏰ 超时时间: {max_wait}秒")
-        print(f"🔄 轮询间隔: {polling_interval}秒")
-        print(f"🎯 置信度: {confidence}")
-        print(f"📝 备注: {step_remark}")
-        print(f"⏱️ 步骤开始时间: {time.strftime('%H:%M:%S', time.localtime())}")
+        # 检测模式（yolo_only | ocr_only | yolo_then_ocr）
+        detection_mode = self._determine_detection_mode(step)
+
+        device_serial = getattr(self.device, 'serial', 'Unknown')
+        if detection_mode == "ocr_only":
+            print(f"  ⏳ 等待元素出现(纯OCR): '{ocr_keywords}'")
+        elif detection_mode == "yolo_then_ocr":
+            print(
+                f"  ⏳ 等待元素出现(YOLO+OCR): 类别='{yolo_class}', 关键字='{ocr_keywords}'"
+            )
+        else:
+            # 默认/兼容：按 YOLO-only 打印
+            print(f"  ⏳ 等待元素出现: '{yolo_class}'")
+        print(
+            f"  ⏰ 最大等待: {max_duration}秒 | 轮询间隔: {polling_interval}秒 | 置信度: {confidence}"
+        )
+        if step_remark:
+            print(f"  📝 备注: {step_remark}")
 
         wait_start_time = time.time()
         element_appeared = False
@@ -2526,119 +2597,148 @@ class ActionProcessor:
         detected_class = ""
         detection_result = None
         success = False  # 修复：初始化success变量，避免UnboundLocalError
+        
+        # 修复：初始化所有在异常处理后使用的变量，避免UnboundLocalError
+        click_position = None
+        click_success = None
+        click_error = None
+        execute_action = step.get("execute_action", "click")
 
         try:
             loop_count = 0
-            while time.time() - wait_start_time < max_wait:
+            while time.time() - wait_start_time < max_duration:
                 loop_count += 1
-                print(f"\n🔍 [循环 {loop_count}] 检查元素是否出现...")
-                # 根据detection_method选择检测方式
-                if detection_method == "ai" and yolo_class:
-                    # AI检测方式
-                    if self.detect_buttons:
-                        # 获取当前屏幕截图
-                        screenshot = get_device_screenshot(self.device)
-                        if screenshot is None:
-                            print("❌ 无法获取屏幕截图")
-                            time.sleep(polling_interval)
-                            continue
-
-                        import cv2
-                        import numpy as np
-                        frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-
-                        success, detection_result = self.detect_buttons(frame, target_class=yolo_class)
-                        print(f"🔍 AI检测结果: success={success}, detection_result={detection_result}")
-
-                        if success and detection_result[0] is not None:
-                            element_appeared = True
-                            x, y, detected_class = detection_result
-                            wait_result = "appeared"
-                            print(f"✅ [AI检测成功] 元素 '{yolo_class}' 已出现!")
-                            print(f"📍 位置: ({x:.1f}, {y:.1f})")
-                            print(f"🏷️ 检测类别: {detected_class}")
-                            break
-                    else:
-                        print("⚠️ AI检测功能不可用")
-
-                elif detection_method == "ui" and ui_type:
-                    # UI检测方式
-                    if DeviceScriptReplayer:
-                        input_handler = DeviceScriptReplayer(self.device.serial)
-                        target_selector = {"type": ui_type}
-                        target_element = input_handler.find_element_smart(target_selector)
-
-                        if target_element:
-                            element_appeared = True
-                            wait_result = "appeared"
-                            bounds = target_element.get('bounds', '')
-                            coords = input_handler._parse_bounds(bounds) if bounds else None
-                            if coords:
-                                x, y = coords
-                                detection_result = (x, y, ui_type)
-                            print(f"✅ [UI检测成功] 元素 '{ui_type}' 已出现!")
-                            break
-                    else:
-                        print("⚠️ UI检测功能不可用")
-
-                if element_appeared:
+                print(f"  🔍 [轮询 {loop_count}] 检测元素...")
+                
+                if not self.detect_buttons:
+                    print("  ❌ AI检测功能不可用")
                     break
+                
+                # 获取当前屏幕截图
+                screenshot = get_device_screenshot(self.device)
+                if screenshot is None:
+                    print("  ⚠️ 无法获取屏幕截图")
+                    time.sleep(polling_interval)
+                    continue
 
-                print(f"⏳ [循环 {loop_count}] 元素尚未出现，等待 {polling_interval}秒后重试...")
-                time.sleep(polling_interval)
-                # 检查是否使用备选方案
-            if not element_appeared and fallback_yolo_class and detection_method == "ui":
-                print(f"\n🔄 UI检测失败，尝试备选AI检测: {fallback_yolo_class}")
-                if self.detect_buttons:
-                    # 获取当前屏幕截图
-                    screenshot = get_device_screenshot(self.device)
-                    if screenshot is not None:
-                        import cv2
-                        import numpy as np
-                        frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                import cv2
+                import numpy as np
+                frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
-                        success, detection_result = self.detect_buttons(frame, target_class=fallback_yolo_class)
-                        if success and detection_result[0] is not None:
-                            element_appeared = True
-                            x, y, detected_class = detection_result
-                            wait_result = "appeared"
-                            print(f"✅ [备选AI检测成功] 元素已出现!")
+                # 根据模式进行检测
+                if detection_mode == "ocr_only":
+                    # 纯 OCR 全屏检测
+                    if ocr_match_method == "first":
+                        ocr_ok, ocr_res = self._ocr_match_first_strategy(
+                            frame, ocr_keywords, ocr_min_score
+                        )
+                    elif ocr_match_method == "desc":
+                        ocr_ok, ocr_res = self._ocr_match_desc_strategy(
+                            frame, ocr_keywords, ocr_match_method_desc,
+                            ocr_min_score
+                        )
                     else:
-                        print("❌ 无法获取屏幕截图用于备选检测")
+                        from apps.scripts.replay_script import (
+                            perform_fullscreen_ocr_detection,
+                        )
+                        ocr_ok, ocr_res = perform_fullscreen_ocr_detection(
+                            frame,
+                            ocr_keywords=ocr_keywords,
+                            ocr_min_score=ocr_min_score,
+                        )
+
+                    if ocr_ok and ocr_res and "position" in ocr_res:
+                        x, y = ocr_res["position"]
+                        detection_result = (x, y, "ocr", None)
+                        detected_class = ocr_res.get("text", "ocr")
+                        element_appeared = True
+                        wait_result = "appeared"
+                        print(
+                            f"  ✅ OCR匹配成功: '{detected_class}' 位置({int(x)},{int(y)})"
+                        )
+                        break
+                elif detection_mode == "yolo_then_ocr":
+                    # YOLO 预检 + OCR 匹配
+                    success, detection_result = self.detect_buttons(
+                        frame,
+                        target_class=yolo_class,
+                        conf_threshold=confidence,
+                        use_ocr=True,
+                        ocr_keywords=ocr_keywords,
+                        ocr_min_score=ocr_min_score,
+                    )
+                    if success and detection_result and detection_result[0] is not None:
+                        element_appeared = True
+                        if len(detection_result) >= 3:
+                            x, y, detected_class = (
+                                detection_result[0],
+                                detection_result[1],
+                                detection_result[2],
+                            )
+                        else:
+                            x, y, detected_class = (
+                                detection_result[0],
+                                detection_result[1],
+                                "unknown",
+                            )
+                        wait_result = "appeared"
+                        print(f"  ✅ 元素已出现: 位置({x:.1f}, {y:.1f})")
+                        break
+                else:
+                    # 兼容：YOLO-only
+                    success, detection_result = self.detect_buttons(
+                        frame, target_class=yolo_class
+                    )
+
+                    if success and detection_result[0] is not None:
+                        element_appeared = True
+                        # 处理返回值 (x, y, class, extra)
+                        if len(detection_result) >= 3:
+                            x, y, detected_class = (
+                                detection_result[0],
+                                detection_result[1],
+                                detection_result[2],
+                            )
+                        else:
+                            x, y, detected_class = (
+                                detection_result[0],
+                                detection_result[1],
+                                "unknown",
+                            )
+                        wait_result = "appeared"
+                        print(f"  ✅ 元素已出现: 位置({x:.1f}, {y:.1f})")
+                        break
+
+                print(f"  ⏳ 元素未出现，{polling_interval}秒后重试...")
+                time.sleep(polling_interval)
 
             total_wait_time = time.time() - wait_start_time
 
             # ====== 自动点击逻辑实现 ======
-            auto_clicked = False
-            click_position = None
-            click_success = None
-            click_error = None
-            execute_action = step.get("execute_action", None)
             if element_appeared and execute_action == "click":
                 try:
                     if detection_result and len(detection_result) >= 2 and detection_result[0] is not None and detection_result[1] is not None:
                         abs_x, abs_y = int(detection_result[0]), int(detection_result[1])
-                        print(f"🤖 自动点击检测到的坐标: ({abs_x}, {abs_y})")
+                        print(f"  🤖 自动点击: ({abs_x}, {abs_y})")
                         self.device.shell(f"input tap {abs_x} {abs_y}")
-                        auto_clicked = True
                         click_position = (abs_x, abs_y)
                         click_success = True
                     else:
-                        print("⚠️ 检测结果无有效坐标，无法自动点击")
+                        print("  ⚠️ 无有效坐标，无法点击")
                         click_success = False
                 except Exception as ce:
-                    print(f"❌ 自动点击异常: {ce}")
+                    print(f"  ❌ 点击异常: {ce}")
                     click_success = False
                     click_error = str(ce)
 
             if element_appeared:
-                print(f"🎉 元素出现检测成功! 总等待时间: {total_wait_time:.1f}秒")
+                print(f"  ✅ 检测成功 (耗时{total_wait_time:.1f}s)")
             else:
                 wait_result = "timeout"
-                print(f"⏰ 等待超时! 总等待时间: {total_wait_time:.1f}秒")
+                print(f"  ⏰ 等待超时 (耗时{total_wait_time:.1f}s)")
 
         except Exception as e:
-            print(f"❌ 等待过程中发生异常: {e}")
+            print(f"  ❌ 等待异常: {e}")
             wait_result = "error"
             total_wait_time = time.time() - wait_start_time
 
@@ -2663,13 +2763,15 @@ class ActionProcessor:
             "data": {
                 "name": "wait_for_appearance",
                 "call_args": {
-                    "detection_method": detection_method,
                     "yolo_class": yolo_class,
-                    "ui_type": ui_type,
-                    "max_wait": max_wait,
+                    "max_duration": max_duration,
                     "polling_interval": polling_interval,
                     "confidence": confidence,
-                    "execute_action": execute_action
+                    "execute_action": execute_action,
+                    "detection_mode": detection_mode,
+                    "ocr_keywords": ocr_keywords,
+                    "ocr_min_score": ocr_min_score,
+                    "ocr_match_method": ocr_match_method
                 },
                 "start_time": wait_start_time,
                 "ret": {
@@ -2677,7 +2779,6 @@ class ActionProcessor:
                     "wait_result": wait_result,
                     "total_wait_time": total_wait_time,
                     "detected_class": detected_class,
-                    "auto_clicked": auto_clicked,
                     "click_position": click_position,
                     "click_success": click_success,
                     "click_error": click_error
@@ -2690,15 +2791,22 @@ class ActionProcessor:
         if screen_data:
             wait_entry["data"]["screen"] = screen_data
 
+        # 返回统一的ActionResult对象
+        # 修复：正确判断成功条件
+        if execute_action == "click":
+            # 有自动点击时：元素出现 AND 点击成功
+            success = element_appeared and (click_success is True)
+        else:
+            # 无自动点击时：仅判断元素是否出现
+            success = element_appeared
+            
+        if not element_appeared and not fail_on_timeout:
+            success = True  # 忽略超时失败
+
         # 添加 executed 字段到日志条目
         wait_entry["data"]["executed"] = success
 
         self._write_log_entry(wait_entry)
-
-        # 返回统一的ActionResult对象
-        success = element_appeared
-        if not element_appeared and not fail_on_timeout:
-            success = True  # 如果配置为忽略超时失败，则认为成功
 
         message = f"wait_for_appearance操作{'成功' if success else '失败'}: {wait_result}"
 
@@ -2711,10 +2819,7 @@ class ActionProcessor:
                 "wait_result": wait_result,
                 "total_wait_time": total_wait_time,
                 "detected_class": detected_class,
-                "detection_method": detection_method,
                 "yolo_class": yolo_class,
-                "ui_type": ui_type,
-                "auto_clicked": auto_clicked,
                 "click_position": click_position,
                 "click_success": click_success,
                 "click_error": click_error
@@ -2722,11 +2827,10 @@ class ActionProcessor:
         )
 
     def _handle_wait_for_stable(self, step, step_idx, log_dir):
-        """处理等待界面稳定步骤 - 等待界面连续N秒无变化，确保操作时机"""
-        detection_method = step.get("detection_method", "ai")
+        """处理等待界面稳定步骤 - 使用截图比较等待界面连续N秒无变化"""
         step_remark = step.get("remark", "")
-        duration = step.get("duration", 2)
-        max_wait = step.get("max_wait", 10)
+        stable_duration = step.get("duration", 2)
+        max_duration = step.get("max_duration", 10)
         check_structure = step.get("check_structure", True)
         check_positions = step.get("check_positions", True)
         tolerance = step.get("tolerance", 0.05)
@@ -2734,8 +2838,8 @@ class ActionProcessor:
 
         print(f"\n🚀 [步骤 {step_idx+1}] 开始执行 wait_for_stable 操作")
         print(f"📋 检测方式: {detection_method}")
-        print(f"🎯 稳定持续时间: {duration}秒")
-        print(f"⏰ 最大等待时间: {max_wait}秒")
+        print(f"🎯 稳定持续时间: {stable_duration}秒")
+        print(f"⏰ 最大等待时间: {max_duration}秒")
         print(f"🔍 检查结构稳定: {check_structure}")
         print(f"📍 检查位置稳定: {check_positions}")
         print(f"📊 变化容忍度: {tolerance}")
@@ -2749,75 +2853,55 @@ class ActionProcessor:
         stability_result = "not_stable"
 
         try:
-            while time.time() - wait_start_time < max_wait:
+            while time.time() - wait_start_time < max_duration:
                 current_time = time.time()
 
-                # 获取当前状态
+                # 使用截图比较检测稳定性
                 current_screenshot = None
-                current_ui_structure = None
-                if detection_method == "ai":
-                    # 使用截图比较检测稳定性
-                    try:
-                        import subprocess
-                        screenshot_result = subprocess.run(
-                            f"adb -s {self.device.serial} exec-out screencap -p",
-                            shell=True, capture_output=True
-                        )
-                        if screenshot_result.returncode == 0:
-                            import cv2
-                            import numpy as np
-                            # 将字节数据转换为图像
-                            nparr = np.frombuffer(screenshot_result.stdout, np.uint8)
-                            current_screenshot = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    except Exception as e:
-                        print(f"⚠️ 截图获取失败: {e}")
-
-                elif detection_method == "ui":
-                    # 使用UI结构比较检测稳定性
-                    if DeviceScriptReplayer:
-                        input_handler = DeviceScriptReplayer(self.device.serial)
-                        current_ui_structure = input_handler.get_ui_hierarchy()
+                try:
+                    import subprocess
+                    screenshot_result = subprocess.run(
+                        f"adb -s {self.device.serial} exec-out screencap -p",
+                        shell=True, capture_output=True
+                    )
+                    if screenshot_result.returncode == 0:
+                        import cv2
+                        import numpy as np
+                        nparr = np.frombuffer(screenshot_result.stdout, np.uint8)
+                        current_screenshot = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                except Exception as e:
+                    print(f"  ⚠️ 截图获取失败: {e}")
 
                 # 检查是否与上次状态相同
                 is_same = False
-
-                if detection_method == "ai" and current_screenshot is not None:
+                if current_screenshot is not None:
                     if last_screenshot is not None:
                         # 计算图像差异
                         diff = cv2.absdiff(current_screenshot, last_screenshot)
                         diff_ratio = np.sum(diff) / (diff.shape[0] * diff.shape[1] * diff.shape[2] * 255)
                         is_same = diff_ratio < tolerance
-                        print(f"🖼️ 截图差异比例: {diff_ratio:.4f} (阈值: {tolerance})")
+                        print(f"  🖼️ 差异比例: {diff_ratio:.4f}")
                     else:
-                        print("📸 获取第一张参考截图")
-                    last_screenshot = current_screenshot.copy() if current_screenshot is not None else None
-
-                elif detection_method == "ui" and current_ui_structure:
-                    if last_ui_structure:
-                        # 简单的字符串比较（可以优化为结构化比较）
-                        is_same = current_ui_structure == last_ui_structure
-                        print(f"🏗️ UI结构相同: {is_same}")
-                    else:
-                        print("🏗️ 获取第一个参考UI结构")
-                    last_ui_structure = current_ui_structure
+                        print("  📸 获取参考截图")
+                    last_screenshot = current_screenshot.copy()
 
                 # 更新稳定状态
                 if is_same:
                     if stable_start_time is None:
                         stable_start_time = current_time
-                        print(f"🟢 界面开始稳定...")
+                        print(f"  🟢 开始稳定...")
 
                     stable_duration = current_time - stable_start_time
-                    print(f"⏱️ 已稳定 {stable_duration:.1f}/{duration}秒")
+                    print(f"  ⏱️ 已稳定 {stable_duration:.1f}/{stable_duration}s")
 
-                    if stable_duration >= duration:
+                    if stable_duration >= stable_duration:
                         is_stable = True
                         stability_result = "stable"
-                        print(f"✅ 界面已稳定 {duration}秒!")
+                        print(f"  ✅ 界面稳定 {stable_duration}s!")
                         break
                 else:
                     if stable_start_time is not None:
-                        print(f"🔄 界面发生变化，重新开始计时")
+                        print(f"  🔄 界面变化，重新计时")
                     stable_start_time = None
 
                 time.sleep(0.5)  # 检查间隔
@@ -2826,12 +2910,12 @@ class ActionProcessor:
 
             if not is_stable:
                 stability_result = "timeout"
-                print(f"⏰ 等待稳定超时! 总等待时间: {total_wait_time:.1f}秒")
+                print(f"  ⏰ 等待超时 (耗时{total_wait_time:.1f}s)")
             else:
-                print(f"🎉 界面稳定检测成功! 总等待时间: {total_wait_time:.1f}秒")
+                print(f"  ✅ 稳定检测成功 (耗时{total_wait_time:.1f}s)")
 
         except Exception as e:
-            print(f"❌ 稳定检测过程中发生异常: {e}")
+            print(f"  ❌ 稳定检测异常: {e}")
             stability_result = "error"
             total_wait_time = time.time() - wait_start_time
 
@@ -2852,9 +2936,8 @@ class ActionProcessor:
             "data": {
                 "name": "wait_for_stable",
                 "call_args": {
-                    "detection_method": detection_method,
-                    "duration": duration,
-                    "max_wait": max_wait,
+                    "stable_duration": stable_duration,
+                    "max_duration": max_duration,
                     "tolerance": tolerance
                 },
                 "start_time": wait_start_time,
@@ -2882,163 +2965,116 @@ class ActionProcessor:
                 "is_stable": is_stable,
                 "stability_result": stability_result,
                 "total_wait_time": total_wait_time,
-                "detection_method": detection_method,
-                "duration": duration,
-                "max_wait": max_wait
+                "stable_duration": stable_duration,
+                "max_duration": max_duration
             }
         )
 
     def _handle_retry_until_success(self, step, step_idx, log_dir):
-        """处理重试直到成功步骤 - 对任意操作进行重试，直到成功或达到最大次数"""        # 解析参数
-        detection_method = step.get("detection_method", "ai")
+        """处理重试直到成功步骤 - 使用AI检测对任意操作进行重试"""
+        # 解析参数
         execute_action = step.get("execute_action",  "click")
         yolo_class = step.get("yolo_class",  "")
-        ui_type = step.get("ui_type",  "")
         text = step.get("text",  "")
         step_remark = step.get("remark", "")
 
         max_retries = step.get("max_retries", 5)
         retry_interval = step.get("retry_interval", 1)
-        polling_interval = step.get("polling_interval", retry_interval)
-        initial_delay = step.get("initial_delay", 1)
-        max_delay = step.get("max_delay", 10)
-        backoff_multiplier = step.get("backoff_multiplier", 2)
         verify_success = step.get("verify_success", False)
         stop_on_success = step.get("stop_on_success", True)
-        print(f"\n🚀 [步骤 {step_idx+1}] 开始执行 retry_until_success 操作")
-        print(f"📋 检测方式: {detection_method}")
-        print(f"🎯 执行操作: {execute_action}")
-        if detection_method == "ai" and yolo_class:
-            print(f"🎯 AI类别: '{yolo_class}'")
-        elif detection_method == "ui" and ui_type:
-            print(f"🎯 UI类型: '{ui_type}'")
-        print(f"🔄 最大重试次数: {max_retries}")
-        print(f"📝 备注: {step_remark}")
+        
+        print(f"  🔄 重试直到成功: {execute_action}操作")
+        if yolo_class:
+            print(f"  🎯 目标元素: '{yolo_class}'")
+        print(f"  🔢 最大重试: {max_retries}次 | 间隔: {retry_interval}秒")
+        if step_remark:
+            print(f"  📝 备注: {step_remark}")
 
         retry_start_time = time.time()
         success = False
         last_error = None
         retry_count = 0
-        current_delay = initial_delay
         for attempt in range(max_retries + 1):  # +1 为第一次尝试
             retry_count = attempt
-            print(f"\n🔄 [尝试 {attempt + 1}/{max_retries + 1}] 执行 {execute_action} 操作...")
+            print(f"  🔄 [尝试 {attempt + 1}/{max_retries + 1}] {execute_action}...")
 
             try:
-                # 构造重试操作的step
-                retry_step = {
-                    "action": execute_action,
-                    "detection_method": detection_method,
-                    "yolo_class": yolo_class,
-                    "ui_type": ui_type,
-                    "text": text,
-                    "remark": f"重试操作 {attempt + 1}: {step_remark}"
-                }                # 根据execute_action执行相应操作
                 operation_success = False
                 if execute_action == "click":
-                    if detection_method == "ai" and yolo_class:
-                        # AI检测点击
-                        if self.detect_buttons:
-                            # 获取当前屏幕截图
-                            screenshot = get_device_screenshot(self.device)
-                            if screenshot is None:
-                                print("❌ 无法获取屏幕截图")
-                                continue
+                    # AI检测点击
+                    if not self.detect_buttons:
+                        print("  ❌ AI检测功能不可用")
+                        break
+                        
+                    screenshot = get_device_screenshot(self.device)
+                    if screenshot is None:
+                        print("  ❌ 无法获取截图")
+                        continue
 
-                            import cv2
-                            import numpy as np
-                            frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                    import cv2
+                    import numpy as np
+                    frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
-                            ai_success, detection_result = self.detect_buttons(frame, target_class=yolo_class)
-                            if ai_success and detection_result[0] is not None:
-                                x, y, detected_class = detection_result
-                                self.device.shell(f"input tap {int(x)} {int(y)}")
-                                operation_success = True
-                                print(f"✅ AI点击成功: ({x:.1f}, {y:.1f})")
-                    elif detection_method == "ui" and ui_type:
-                        # UI检测点击                        if DeviceScriptReplayer:
-                            input_handler = DeviceScriptReplayer(self.device.serial)
-                            target_selector = {"type": ui_type}
-                            operation_success = input_handler.perform_click_action(target_selector)
-                            if operation_success:
-                                print(f"✅ UI点击成功")
+                    ai_success, detection_result = self.detect_buttons(frame, target_class=yolo_class)
+                    if ai_success and detection_result[0] is not None:
+                        if len(detection_result) >= 3:
+                            x, y, detected_class = detection_result[0], detection_result[1], detection_result[2]
+                        else:
+                            x, y, detected_class = detection_result[0], detection_result[1], "unknown"
+                        self.device.shell(f"input tap {int(x)} {int(y)}")
+                        operation_success = True
+                        print(f"  ✅ 点击成功: ({x:.1f}, {y:.1f})")
 
                 elif execute_action == "input":
-                    # 文本输入操作
-                    # 🔧 重要修复：在retry中也需要进行参数化替换
+                    # AI定位输入框并输入文本
                     input_text = text
 
-                    # 智能账号分配：如果需要账号参数但没有分配，尝试自动分配
-                    if ("${account:username}" in input_text or "${account:password}" in input_text):
+                    # 参数替换处理
+                    if "${account:username}" in input_text or "${account:password}" in input_text:
                         if not self.device_account:
-                            print("🔄 检测到需要账号参数但设备未分配账号，尝试自动分配...")
+                            print("  🔄 自动分配账号...")
                             self._auto_allocate_device_account()
 
-                    # 参数替换处理：${account:username} 和 ${account:password}
                     if "${account:username}" in input_text:
                         if self.device_account and len(self.device_account) >= 1:
                             input_text = input_text.replace("${account:username}", self.device_account[0])
-                            print(f"✅ 替换用户名参数: {self.device_account[0]}")
+                            print(f"  ✅ 替换用户名")
                         else:
-                            device_serial = getattr(self.device, 'serial', self.device_name)
-                            print(f"❌ 错误: 设备 {device_serial} 没有分配账号，无法替换用户名参数")
+                            print(f"  ❌ 未分配账号")
                             continue
 
                     if "${account:password}" in input_text:
                         if self.device_account and len(self.device_account) >= 2:
                             input_text = input_text.replace("${account:password}", self.device_account[1])
-                            print(f"✅ 替换密码参数")
+                            print(f"  ✅ 替换密码")
                         else:
-                            device_serial = getattr(self.device, 'serial', self.device_name)
-                            print(f"❌ 错误: 设备 {device_serial} 没有分配账号，无法替换密码参数")
+                            print(f"  ❌ 未分配账号")
                             continue
 
-                    # 支持AI定位的输入框后聚焦输入
-                    if detection_method == "ai" and yolo_class:
-                        if self.detect_buttons:
-                            screenshot = get_device_screenshot(self.device)
-                            if screenshot is None:
-                                print("❌ 无法获取屏幕截图")
-                            else:
-                                import cv2
-                                import numpy as np
-                                frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
-                                ai_ok, detection_result = self.detect_buttons(frame, target_class=yolo_class)
-                                if ai_ok and detection_result[0] is not None:
-                                    x, y = detection_result[0], detection_result[1]
-                                    # 点击输入框聚焦
-                                    self.device.shell(f"input tap {int(x)} {int(y)}")
-                                    time.sleep(0.5)
-                                    # 输入文本 - 使用替换后的input_text
-                                    escaped_text = input_text.replace(' ', '%s').replace("'", "\\'")
-                                    self.device.shell(f"input text '{escaped_text}'")
-                                    operation_success = True
-                                    print(f"✅ AI文本输入成功: {input_text}")                    # 兼容UI方式输入
-                    elif detection_method == "ui" and ui_type:
-                        if DeviceScriptReplayer:
-                            input_handler = DeviceScriptReplayer(self.device.serial)
-                            target_selector = {"type": ui_type}
-                            # 先找到输入框
-                            target_element = input_handler.find_element_smart(target_selector)
-                            if target_element:
-                                # 点击获取焦点
-                                if input_handler.tap_element(target_element):
-                                    time.sleep(0.5)
-                                    # 输入文本 - 使用替换后的input_text
-                                    escaped_text = input_text.replace(' ', '%s').replace("'", "\\'")
-                                    self.device.shell(f"input text '{escaped_text}'")
-                                    operation_success = True
-                                    print(f"✅ 文本输入成功")
-
-                elif execute_action == "checkbox":
-                    # 复选框操作
-                    if detection_method == "ui" and ui_type:
-                        if DeviceScriptReplayer:
-                            input_handler = DeviceScriptReplayer(self.device.serial)
-                            target_selector = {"type": ui_type}
-                            operation_success = input_handler.perform_checkbox_action(target_selector)
-                            if operation_success:
-                                print(f"✅ 复选框操作成功")
+                    # AI定位输入框
+                    if not self.detect_buttons:
+                        print("  ❌ AI检测功能不可用")
+                        break
+                        
+                    screenshot = get_device_screenshot(self.device)
+                    if screenshot is None:
+                        print("  ❌ 无法获取截图")
+                        continue
+                        
+                    import cv2
+                    import numpy as np
+                    frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                    ai_ok, detection_result = self.detect_buttons(frame, target_class=yolo_class)
+                    if ai_ok and detection_result[0] is not None:
+                        x, y = detection_result[0], detection_result[1]
+                        # 点击输入框聚焦
+                        self.device.shell(f"input tap {int(x)} {int(y)}")
+                        time.sleep(0.5)
+                        # 输入文本
+                        escaped_text = input_text.replace(' ', '%s').replace("'", "\\'")
+                        self.device.shell(f"input text '{escaped_text}'")
+                        operation_success = True
+                        print(f"  ✅ 文本输入成功")
 
                 # 验证操作成功（如果启用）
                 if operation_success and verify_success:
@@ -3049,29 +3085,27 @@ class ActionProcessor:
 
                 if operation_success:
                     success = True
-                    print(f"🎉 [尝试 {attempt + 1}] 操作成功!")
+                    print(f"  🎉 操作成功!")
                     if stop_on_success:
                         break
                 else:
-                    print(f"❌ [尝试 {attempt + 1}] 操作失败")
+                    print(f"  ❌ 操作失败")
 
             except Exception as e:
-                print(f"❌ [尝试 {attempt + 1}] 操作异常: {e}")
+                print(f"  ❌ 操作异常: {e}")
                 last_error = str(e)
 
-            # 如果还有重试机会，计算延迟时间
+            # 如果还有重试机会，等待后重试
             if attempt < max_retries and not (success and stop_on_success):
-                delay = polling_interval
-
-                print(f"⏳ 等待 {delay}秒后重试...")
-                time.sleep(delay)
+                print(f"  ⏳ 等待{retry_interval}s后重试...")
+                time.sleep(retry_interval)
 
         total_retry_time = time.time() - retry_start_time
 
         if success:
-            print(f"🎉 重试操作最终成功! 尝试次数: {retry_count + 1}, 总时间: {total_retry_time:.1f}秒")
+            print(f"  ✅ 重试成功 (尝试{retry_count + 1}次, 耗时{total_retry_time:.1f}s)")
         else:
-            print(f"❌ 重试操作最终失败! 尝试次数: {retry_count + 1}, 总时间: {total_retry_time:.1f}秒")
+            print(f"  ❌ 重试失败 (尝试{retry_count + 1}次, 耗时{total_retry_time:.1f}s)")
 
         # 创建screen对象
         screen_data = self._create_unified_screen_object(
@@ -3084,17 +3118,14 @@ class ActionProcessor:
         # 记录重试结果日志
         timestamp = time.time()
         retry_entry = {
-
             "tag": "function",
             "depth": 1,
             "time": timestamp,
             "data": {
                 "name": "retry_until_success",
                 "call_args": {
-                    "detection_method": detection_method,
                     "execute_action": execute_action,
                     "yolo_class": yolo_class,
-                    "ui_type": ui_type,
                     "max_retries": max_retries
                 },
                 "start_time": retry_start_time,
@@ -3126,8 +3157,7 @@ class ActionProcessor:
                 "retry_count": retry_count,
                 "total_retry_time": total_retry_time,
                 "last_error": last_error,
-                "execute_action": execute_action,
-                "detection_method": detection_method
+                "execute_action": execute_action
             }
         )
 
@@ -3340,14 +3370,14 @@ class ActionProcessor:
 
     def handle_system_dialogs(
         self,
-        max_wait: float = 5.0,
+        max_duration: float = 5.0,
         retry_interval: float = 0.5,
         duration: float = 1.0
     ) -> bool:
         """
         检查并自动处理系统弹窗。
         参数:
-            max_wait: 最多等待时间（秒）
+            max_duration: 最多等待时间（秒）
             retry_interval: 每次检测间隔（秒）
             duration: 点击后等待弹窗消失时间（秒）
         """
@@ -3355,7 +3385,7 @@ class ActionProcessor:
         start = time.time()
         handled = False
 
-        while time.time() - start < max_wait:
+        while time.time() - start < max_duration:
             found = self._detect_and_click_dialog()
             if found:
                 handled = True
@@ -3579,13 +3609,16 @@ class ActionProcessor:
 
                 # 步骤前处理弹窗（仅当明确启用时）
                 if auto_handle:
-                    max_wait = step.get('dialog_max_wait', meta.get('dialog_max_wait', 5.0))
+                    # 兼容参数：优先 dialog_max_duration，回退到 dialog_max_wait
+                    dialog_max_duration = step.get('dialog_max_duration', meta.get('dialog_max_duration', None))
+                    if dialog_max_duration is None:
+                        dialog_max_duration = step.get('dialog_max_wait', meta.get('dialog_max_wait', 5.0))
                     retry_interval = step.get('dialog_retry_interval', meta.get('dialog_retry_interval', 0.5))
                     duration = step.get('dialog_duration', meta.get('dialog_duration', 1.0))
 
-                    print(f"🛡️ 检测并处理系统弹窗（最大等待：{max_wait}秒）")
+                    print(f"🛡️ 检测并处理系统弹窗（最大等待：{dialog_max_duration}秒）")
                     self.handle_system_dialogs(
-                        max_wait=max_wait,
+                        max_duration=dialog_max_duration,
                         retry_interval=retry_interval,
                         duration=duration
                     )
@@ -4218,3 +4251,481 @@ class ActionProcessor:
                 details={"operation": "fallback_click_priority", "error": str(e)},
                 executed=False
             )
+
+    def _ocr_match_first_strategy(self, frame, ocr_keywords, ocr_min_score):
+        """第一个匹配策略：遇到第一个符合条件的就返回"""
+        print(f"🎯 使用第一个匹配策略")
+        
+        try:
+            from apps.scripts.replay_script import _get_ocr_pipeline
+            from apps.ocr.services.keyword_filter import KeywordFilter
+            
+            # 获取OCR Pipeline
+            pipeline = _get_ocr_pipeline()
+            if pipeline is None:
+                print(f"❌ OCR Pipeline未初始化")
+                return False, None
+            
+            # 对整个屏幕进行OCR识别
+            predictions = list(pipeline.predict(
+                [frame],
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            ))
+            
+            if not predictions:
+                return False, None
+            
+            # 提取识别结果
+            result = predictions[0]
+            res_json = getattr(result, "json", {}).get("res", {})
+            
+            texts = res_json.get("rec_texts", [])
+            scores = res_json.get("rec_scores", [])
+            rec_polys = res_json.get("rec_polys", [])
+            
+            if not texts:
+                return False, None
+            
+            # 打印所有识别到的OCR文本
+            print(f"📋 页面OCR识别结果 (共 {len(texts)} 个文本):")
+            print("=" * 80)
+            for i, text in enumerate(texts):
+                if not text or not text.strip():
+                    continue
+                score = float(scores[i]) if i < len(scores) else 0.0
+                polygon = rec_polys[i] if i < len(rec_polys) else []
+                if polygon:
+                    x_coords = [p[0] for p in polygon]
+                    y_coords = [p[1] for p in polygon]
+                    center_x = int(sum(x_coords) / len(x_coords))
+                    center_y = int(sum(y_coords) / len(y_coords))
+                    print(f"[{i+1}] '{text.strip()}' | 置信度: {score:.2f} | 位置: ({center_x}, {center_y})")
+            print("=" * 80)
+            
+            # 设置关键字过滤器
+            keyword_filter_config = {
+                "enabled": True,
+                "keywords": ocr_keywords,
+                "fuzzy_match": True,
+                "fuzzy_similarity": 0.80,
+                "ignore_case": True,
+                "ignore_spaces": True,
+                "ignore_digits": False,
+                "min_confidence": ocr_min_score
+            }
+            
+            keyword_filter = KeywordFilter(keyword_filter_config)
+            
+            # 查找第一个匹配项
+            for i, text in enumerate(texts):
+                if not text or not text.strip():
+                    continue
+                
+                score = float(scores[i]) if i < len(scores) else 0.0
+                if score < ocr_min_score:
+                    continue
+                
+                # 构造OCR结果格式用于过滤
+                ocr_results = [{
+                    "image_path": "",
+                    "texts": [text.strip()],
+                    "scores": [score],
+                    "has_match": True
+                }]
+                
+                filtered_results = keyword_filter.filter_results(ocr_results)
+                
+                if len(filtered_results) > 0:
+                    # 找到第一个匹配，立即返回
+                    polygon = rec_polys[i] if i < len(rec_polys) else []
+                    if polygon:
+                        x_coords = [p[0] for p in polygon]
+                        y_coords = [p[1] for p in polygon]
+                        x = int(sum(x_coords) / len(x_coords))
+                        y = int(sum(y_coords) / len(y_coords))
+                        
+                        print(f"✅ OCR第一个匹配[{i}]: '{text.strip()}' 位置: ({x}, {y})")
+                        
+                        return True, {
+                            "position": (x, y),
+                            "text": text.strip(),
+                            "score": score,
+                            "polygon": polygon
+                        }
+            
+            print(f"❌ 未找到匹配关键字 '{ocr_keywords}' 的文本")
+            return False, None
+            
+        except Exception as e:
+            print(f"❌ first策略OCR检测异常: {e}")
+            return False, None
+
+    def _ocr_match_desc_strategy(self, frame, ocr_keywords, description, ocr_min_score):
+        """基于描述的智能匹配策略：根据空间位置描述选择最佳匹配"""
+        print(f"🎯 使用描述匹配策略: {description}")
+        
+        try:
+            from apps.scripts.replay_script import _get_ocr_pipeline
+            from apps.ocr.services.keyword_filter import KeywordFilter
+            
+            # 获取OCR Pipeline
+            pipeline = _get_ocr_pipeline()
+            if pipeline is None:
+                print(f"❌ OCR Pipeline未初始化")
+                return False, None
+            
+            # 对整个屏幕进行OCR识别
+            predictions = list(pipeline.predict(
+                [frame],
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+            ))
+            
+            if not predictions:
+                return False, None
+            
+            # 提取识别结果
+            result = predictions[0]
+            res_json = getattr(result, "json", {}).get("res", {})
+            
+            texts = res_json.get("rec_texts", [])
+            scores = res_json.get("rec_scores", [])
+            rec_polys = res_json.get("rec_polys", [])
+            
+            if not texts:
+                return False, None
+            
+            # 打印所有识别到的OCR文本
+            print(f"📋 页面OCR识别结果 (共 {len(texts)} 个文本):")
+            print("=" * 80)
+            for i, text in enumerate(texts):
+                if not text or not text.strip():
+                    continue
+                score = float(scores[i]) if i < len(scores) else 0.0
+                polygon = rec_polys[i] if i < len(rec_polys) else []
+                if polygon:
+                    x_coords = [p[0] for p in polygon]
+                    y_coords = [p[1] for p in polygon]
+                    center_x = int(sum(x_coords) / len(x_coords))
+                    center_y = int(sum(y_coords) / len(y_coords))
+                    print(f"[{i+1}] '{text.strip()}' | 置信度: {score:.2f} | 位置: ({center_x}, {center_y})")
+            print("=" * 80)
+            
+            # 设置关键字过滤器
+            keyword_filter_config = {
+                "enabled": True,
+                "keywords": ocr_keywords,
+                "fuzzy_match": True,
+                "fuzzy_similarity": 0.80,
+                "ignore_case": True,
+                "ignore_spaces": True,
+                "ignore_digits": False,
+                "min_confidence": ocr_min_score
+            }
+            
+            keyword_filter = KeywordFilter(keyword_filter_config)
+            
+            # 使用统一的关键字预处理方法
+            keywords_list, normalized_keywords = self._prepare_keywords(ocr_keywords)
+            
+            # 收集所有匹配的关键字文本
+            target_matches = []
+            all_texts_with_positions = []
+            
+            for i, text in enumerate(texts):
+                if not text or not text.strip():
+                    continue
+                
+                score = float(scores[i]) if i < len(scores) else 0.0
+                if score < ocr_min_score:
+                    continue
+                
+                polygon = rec_polys[i] if i < len(rec_polys) else []
+                if polygon:
+                    x_coords = [p[0] for p in polygon]
+                    y_coords = [p[1] for p in polygon]
+                    center_x = int(sum(x_coords) / len(x_coords))
+                    center_y = int(sum(y_coords) / len(y_coords))
+                    
+                    # 记录所有文本位置（用于查找参考元素）
+                    all_texts_with_positions.append({
+                        "text": text.strip(),
+                        "position": (center_x, center_y),
+                        "polygon": polygon
+                    })
+                    
+                    # 检查是否匹配目标关键字
+                    ocr_results = [{
+                        "image_path": "",
+                        "texts": [text.strip()],
+                        "scores": [score],
+                        "has_match": True
+                    }]
+                    
+                    filtered_results = keyword_filter.filter_results(ocr_results)
+                    
+                    if len(filtered_results) > 0:
+                        target_matches.append({
+                            "index": i,
+                            "text": text.strip(),
+                            "score": score,
+                            "polygon": polygon,
+                            "position": (center_x, center_y)
+                        })
+            
+            # 若存在严格匹配（文本与关键字完全一致，忽略大小写与空格），优先保留
+            used_strict_keyword = False
+            if target_matches:
+                strict_candidates = []
+                for m in target_matches:
+                    norm_text = self._normalize_text(m["text"])
+                    if norm_text in normalized_keywords:
+                        strict_candidates.append(m)
+                if strict_candidates:
+                    print(f"✅ 使用严格关键字匹配，保留 {len(strict_candidates)} 个候选")
+                    target_matches = strict_candidates
+                    used_strict_keyword = True
+                else:
+                    print("⚠️ 未找到严格关键字匹配，回退到包含/模糊匹配结果")
+            
+            if not target_matches:
+                print(f"❌ 未找到匹配关键字 '{ocr_keywords}' 的文本")
+                return False, None
+            
+            # 根据描述选择最佳匹配
+            best_match = self._select_match_by_description(target_matches, all_texts_with_positions, description)
+            
+            if best_match:
+                # 若未使用严格匹配，但候选文本包含关键字，则尝试对子串进行近似定位
+                adjust_pos = best_match["position"]
+                if not used_strict_keyword and keywords_list:
+                    raw_text = best_match["text"] or ""
+                    # 取第一个出现的关键字进行近似定位
+                    chosen_kw = None
+                    chosen_idx = -1
+                    for kw in keywords_list:
+                        if not kw:
+                            continue
+                        idx = raw_text.find(kw)
+                        if idx >= 0:
+                            chosen_kw = kw
+                            chosen_idx = idx
+                            break
+                    if chosen_kw is not None and best_match.get("polygon"):
+                        poly = best_match["polygon"] or []
+                        try:
+                            xs = [p[0] for p in poly]
+                            ys = [p[1] for p in poly]
+                            left, right = min(xs), max(xs)
+                            top, bottom = min(ys), max(ys)
+                            text_len = max(len(raw_text), 1)
+                            center_ratio = (chosen_idx + len(chosen_kw) / 2.0) / text_len
+                            # 近似计算子串中心点（假设水平排版）
+                            sub_x = int(left + (right - left) * center_ratio)
+                            sub_y = int((top + bottom) / 2)
+                            adjust_pos = (sub_x, sub_y)
+                            print(f"🔧 子串定位: 在 '{raw_text}' 中定位 '{chosen_kw}' -> {adjust_pos}")
+                        except Exception as _:
+                            pass
+                print(f"✅ OCR描述匹配[{best_match['index']}]: '{best_match['text']}' 位置: {adjust_pos}")
+                return True, {
+                    "position": adjust_pos,
+                    "text": best_match["text"],
+                    "score": best_match["score"],
+                    "polygon": best_match["polygon"]
+                }
+            else:
+                # 使用desc策略时，找不到参考文本说明页面状态不对（未完全加载/账号未登录）
+                # 返回False触发重试，等待页面完全加载
+                print(f"❌ 根据描述 '{description}' 未找到合适的匹配（可能页面未完全加载）")
+                print(f"⚠️ 建议：等待页面完全加载后再重试")
+                return False, None
+                
+        except Exception as e:
+            print(f"❌ desc策略OCR检测异常: {e}")
+            return False, None
+
+    def _select_match_by_description(self, matches, all_texts_with_positions, description):
+        """
+        根据描述选择最佳匹配
+        
+        严格逻辑：
+        1. 如果有方位描述，必须找到参考文本并验证方位关系
+        2. 找不到参考文本或不满足方位关系，返回None（视为目标未出现）
+        3. 只有在完全没有描述时，才允许返回单个匹配
+        """
+        if not matches:
+            return None
+        
+        # 解析空间位置描述
+        reference_text = None
+        relation = None
+        
+        # 解析类似 "shya27 的上方" 的描述
+        if " 的上方" in description or " 上方" in description:
+            relation = "above"
+            reference_text = description.replace(" 的上方", "").replace(" 上方", "").strip()
+        elif " 的下方" in description or " 下方" in description:
+            relation = "below"
+            reference_text = description.replace(" 的下方", "").replace(" 下方", "").strip()
+        elif " 的左边" in description or " 左边" in description:
+            relation = "left"
+            reference_text = description.replace(" 的左边", "").replace(" 左边", "").strip()
+        elif " 的右边" in description or " 右边" in description:
+            relation = "right"
+            reference_text = description.replace(" 的右边", "").replace(" 右边", "").strip()
+        
+        # 如果有方位描述，必须严格验证
+        if reference_text and relation:
+            print(f"🔍 解析描述: 寻找相对于 '{reference_text}' {relation} 的元素")
+            
+            # 查找参考元素的位置
+            reference_position = self._find_reference_position(reference_text, all_texts_with_positions)
+            
+            if reference_position:
+                print(f"🔍 参考元素位置: {reference_position}")
+                
+                # 根据空间关系选择最佳匹配
+                best_match = self._select_by_spatial_relation(matches, reference_position, relation)
+                
+                if best_match:
+                    return best_match
+                else:
+                    # 找到参考文本，但没有符合方位关系的目标
+                    print(f"❌ 找到参考文本 '{reference_text}'，但没有符合'{relation}'方位关系的目标")
+                    return None
+            else:
+                # 找不到参考文本，说明页面状态不正确（可能未完全加载）
+                # 必须返回None触发重试，避免误点击
+                print(f"❌ 未找到参考文本 '{reference_text}'，视为目标未出现")
+                print(f"💡 原因：页面可能未完全加载、账号信息未显示或参考文本不存在")
+                return None
+        
+        # 只有在完全没有方位描述时，才允许使用默认匹配
+        # 这是为了兼容没有描述的旧配置
+        if len(matches) == 1:
+            print(f"⚠️ 无方位描述，返回唯一匹配")
+            return matches[0]
+        else:
+            print(f"⚠️ 无方位描述，返回最高得分匹配")
+            return max(matches, key=lambda m: m["score"])
+
+    def _find_reference_position(self, reference_text, all_texts_with_positions):
+        """查找参考文本的位置
+        
+        采用三级匹配策略解决参考文本匹配问题：
+        1. 精确子串匹配（忽略大小写）
+        2. 部分字符匹配（检查字符包含比例，解决 'shya' vs 'hsya10' 问题）
+        3. 模糊相似度匹配
+        """
+        import difflib
+        
+        print(f"🔍 [调试] 开始查找参考文本: '{reference_text}'")
+        print(f"🔍 [调试] all_texts_with_positions 总数: {len(all_texts_with_positions)}")
+        
+        # 策略1：精确子串匹配（忽略大小写）
+        ref_lower = reference_text.lower()
+        for idx, item in enumerate(all_texts_with_positions):
+            text = item["text"]
+            text_lower = text.lower()
+            contains_check = ref_lower in text_lower
+            reverse_check = text_lower in ref_lower
+            
+            if contains_check or reverse_check:
+                print(f"🎯 精确匹配找到参考文本[{idx+1}]: '{text}' -> '{reference_text}'")
+                return item["position"]
+        
+        # 策略2：部分字符匹配（检查参考文本的字符是否大部分出现在目标文本中）
+        # 这个策略专门解决 'shya' vs 'hsya10' 这类问题
+        print(f"🔍 [调试] 精确匹配失败，尝试部分字符匹配...")
+        best_partial_match = None
+        best_char_ratio = 0.0
+        char_ratio_threshold = 0.7  # 字符包含比例阈值70%
+        
+        for idx, item in enumerate(all_texts_with_positions):
+            text = item["text"]
+            text_lower = text.lower()
+            
+            # 计算参考文本中有多少字符出现在目标文本中
+            matched_chars = sum(1 for char in ref_lower if char in text_lower)
+            char_ratio = matched_chars / len(ref_lower) if len(ref_lower) > 0 else 0
+            
+            # 调试输出前几个高匹配度的文本
+            if char_ratio > 0.5:
+                print(f"🔍 [部分匹配{idx+1}] 文本: '{text}' | 字符匹配度: {char_ratio:.2f} ({matched_chars}/{len(ref_lower)})")
+            
+            if char_ratio > char_ratio_threshold and char_ratio > best_char_ratio:
+                best_char_ratio = char_ratio
+                best_partial_match = item
+        
+        if best_partial_match:
+            print(f"🎯 部分字符匹配找到参考文本: '{best_partial_match['text']}' -> '{reference_text}' (字符匹配度: {best_char_ratio:.2f})")
+            return best_partial_match["position"]
+        
+        # 策略3：模糊相似度匹配
+        print(f"🔍 [调试] 部分字符匹配失败，尝试模糊相似度匹配...")
+        best_fuzzy_match = None
+        best_similarity = 0.0
+        similarity_threshold = 0.5  # 降低相似度阈值到0.5
+        
+        for idx, item in enumerate(all_texts_with_positions):
+            text = item["text"]
+            # 计算文本相似度
+            similarity = difflib.SequenceMatcher(None, ref_lower, text.lower()).ratio()
+            
+            # 调试输出前几个高相似度的文本
+            if similarity > 0.3:
+                print(f"🔍 [模糊匹配{idx+1}] 文本: '{text}' | 相似度: {similarity:.2f}")
+            
+            if similarity > similarity_threshold and similarity > best_similarity:
+                best_similarity = similarity
+                best_fuzzy_match = item
+        
+        if best_fuzzy_match:
+            print(f"🎯 模糊匹配找到参考文本: '{best_fuzzy_match['text']}' -> '{reference_text}' (相似度: {best_similarity:.2f})")
+            return best_fuzzy_match["position"]
+        
+        # 所有策略都失败，输出调试信息
+        print(f"❌ 未找到参考文本 '{reference_text}'")
+        print(f"📋 可用的OCR文本列表:")
+        for i, item in enumerate(all_texts_with_positions[:10]):  # 只显示前10个避免日志过长
+            print(f"   {i+1}. '{item['text']}' at {item['position']}")
+        if len(all_texts_with_positions) > 10:
+            print(f"   ... 还有 {len(all_texts_with_positions) - 10} 个文本")
+        
+        return None
+
+    def _select_by_spatial_relation(self, matches, reference_position, relation):
+        """根据空间关系选择最佳匹配"""
+        ref_x, ref_y = reference_position
+        
+        valid_matches = []
+        
+        for match in matches:
+            match_x, match_y = match["position"]
+            
+            # 根据关系筛选有效匹配
+            if relation == "above" and match_y < ref_y:
+                distance = ref_y - match_y
+                valid_matches.append((match, distance))
+            elif relation == "below" and match_y > ref_y:
+                distance = match_y - ref_y
+                valid_matches.append((match, distance))
+            elif relation == "left" and match_x < ref_x:
+                distance = ref_x - match_x
+                valid_matches.append((match, distance))
+            elif relation == "right" and match_x > ref_x:
+                distance = match_x - ref_x
+                valid_matches.append((match, distance))
+        
+        if valid_matches:
+            # 选择距离最近的匹配
+            best_match, min_distance = min(valid_matches, key=lambda x: x[1])
+            print(f"🎯 选择距离最近的匹配 (距离: {min_distance}px)")
+            return best_match
+        else:
+            print(f"⚠️ 没有符合空间关系 '{relation}' 的匹配")
+            return None

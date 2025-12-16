@@ -482,11 +482,12 @@ class AppLifecycleManager:
             bool: 启动是否成功
         """
         try:
-            logger.info(f"启动应用包 {package_name} 在设备 {device_serial}")
-
+            
             # 先停止应用
             self.force_stop_by_package(package_name, device_serial)
             time.sleep(1)
+
+            logger.info(f"启动应用包 {package_name} 在设备 {device_serial}")
 
             # 构建启动命令
             if activity_name:
