@@ -203,7 +203,7 @@ class KeywordFilter:
     
     def filter_results(self, ocr_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        过滤OCR结果，只保留包含关键字的结果
+        过滤OCR结果，根据关键字更新has_match字段
         
         参数:
             ocr_results: OCR结果列表，每个结果包含：
@@ -214,12 +214,11 @@ class KeywordFilter:
                 - ...
         
         返回:
-            过滤后的OCR结果列表（只包含匹配关键字的结果）
+            更新后的OCR结果列表
         """
         if not self.enabled or not self.keywords:
             return ocr_results
         
-        filtered_results = []
         total_count = len(ocr_results)
         language_matched = 0  # 语言匹配数量
         keyword_matched = 0   # 关键字匹配数量
@@ -237,16 +236,15 @@ class KeywordFilter:
             if self._contains_keywords(result):
                 # 通过语言检查 + 关键字检查 = 真正命中
                 result['has_match'] = True
-                filtered_results.append(result)
                 keyword_matched += 1
             else:
                 # 通过语言检查但未包含关键字
                 result['has_match'] = False
         
         logger.info(f"关键字过滤完成: 原始={total_count}, 语言匹配={language_matched}, "
-                   f"关键字匹配={keyword_matched}, 最终命中={len(filtered_results)}")
+                   f"关键字匹配={keyword_matched}")
         
-        return filtered_results
+        return ocr_results
     
     def _contains_keywords(self, result: Dict[str, Any]) -> bool:
         """
