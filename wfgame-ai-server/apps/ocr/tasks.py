@@ -17,12 +17,11 @@ import base64
 import io
 from PIL import Image
 from django.template.loader import render_to_string
+from django.db.models import Q
 
-from .models import OCRTask, OCRResult, OCRGitRepository, OCRCache, OCRCacheHit
+from .models import OCRTask, OCRResult, OCRCache, OCRCacheHit
 from apps.ocr.services.ocr_service import OCRService
-from apps.ocr.services.multi_thread_ocr import MultiThreadOCR
 from apps.ocr.services.two_stage_ocr import TwoStageOCRService
-from apps.ocr.services.performance_config import get_performance_config
 from .services.gitlab import (
     DownloadResult,
     GitLabService,
@@ -33,6 +32,9 @@ from apps.notifications.tasks import notify_ocr_task_progress
 from .services.compare_service import TransRepoConfig
 from .serializers import OCRTaskSerializer, OCRResultSerializer
 from enum import Enum
+
+from apps.notifications.services import send_message, SSEEvent
+
 
 class BaseEnum(Enum):
     def __new__(cls, value, label, order, type=None, color=None):
@@ -718,6 +720,14 @@ def process_ocr_task(task_id):
         OCRCache.record_cache(task_id)
 
 
+        # 将任务结果中的每个图片上传到 minio
+        notify_ocr_task_progress({
+            "id": task_id,
+            "remark": f"正在上传OCR结果图片到存储服务...",
+        })
+        OCRTask.upload_images_to_minio(task_id, include_cache_hits=False)
+
+
         # 生成汇总报告
         notify_ocr_task_progress({
             "id": task_id,
@@ -1165,73 +1175,106 @@ def binding_translated_image(task_id: str):
         update_trans_repo_status("failed", str(e))
 
 
+def compress_image(path):
+    if not path: return ""
+    abs_path = os.path.join(settings.MEDIA_ROOT, path)
+    if not os.path.exists(abs_path): return ""
+
+    try:
+        with Image.open(abs_path) as img:
+            buffer = io.BytesIO()
+            # 优先尝试 WebP 格式 (体积小且质量好，特别适合带文字的截图)
+            try:
+                # 如果是 RGBA 模式，WebP 可以保留透明度；如果是其他模式转 RGB
+                if img.mode not in ('RGB', 'RGBA'):
+                    img = img.convert('RGB')
+
+                # quality=75: 视觉无损
+                # method=4: 默认压缩速度/质量平衡
+                img.save(buffer, format="WEBP", quality=75, method=4)
+                mime_type = "image/webp"
+            except Exception:
+                # 回退到 JPEG
+                buffer.seek(0)
+                buffer.truncate()
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                # quality=75: 保证清晰度
+                # subsampling=0: 关闭色度抽样，防止文字边缘颜色失真(变红/变糊)
+                # optimize=True: 优化 Huffman 表，减小体积
+                img.save(buffer, format="JPEG", quality=75, optimize=True, subsampling=0)
+                mime_type = "image/jpeg"
+
+            img_str = base64.b64encode(buffer.getvalue()).decode()
+            return f"data:{mime_type};base64,{img_str}"
+    except Exception as e:
+        logger.error(f"图片处理失败 {abs_path}: {e}")
+        return ""
 
 @shared_task()
-def export_offline_html_task(task_id: str):
+def export_offline_html_task(task_id: str, filter_data: dict = None, file_name: str = None):
     """
     导出离线HTML报告任务
     """
-    logger.info(f"开始导出离线报告: {task_id}")
+    logger.info(f"开始导出离线报告: {task_id}, 筛选条件: {filter_data}")
     try:
         task = OCRTask.objects.all_teams().get(id=task_id)
         
         # 序列化数据
         task_data = OCRTaskSerializer(task).data
         
+        # 构建查询集
+        results_qs = task.related_results.all().order_by('id')
+        
+        if filter_data:
+            # 1. has_match
+            has_match = filter_data.get('has_match')
+            if has_match is not None:
+                results_qs = results_qs.filter(has_match=has_match)
+                
+            # 2. result_type
+            result_type = filter_data.get('result_type')
+            if result_type:
+                results_qs = results_qs.filter(result_type=result_type)
+                
+            # 3. is_verified
+            is_verified = filter_data.get('is_verified')
+            if is_verified is not None:
+                results_qs = results_qs.filter(is_verified=is_verified)
+                
+            # 4. is_translated
+            is_translated = filter_data.get('is_translated')
+            if is_translated is not None:
+                results_qs = results_qs.filter(is_translated=is_translated)
+                
+            # 5. keyword (search in texts)
+            keyword = filter_data.get('keyword')
+            if keyword:
+                matching_ids = []
+                for result in results_qs:
+                    if result.texts:
+                        for text in result.texts:
+                            if keyword.lower() in text.lower():
+                                matching_ids.append(result.id)
+                                break
+                results_qs = results_qs.filter(id__in=matching_ids)
+
         # 分批处理结果，避免一次性加载过多数据导致内存溢出
         results_data = []
         batch_size = 50  # 每批处理的数量
-        total_count = task.related_results.count()
+        total_count = results_qs.count()
         
         logger.info(f"待处理结果总数: {total_count}，批次大小: {batch_size}")
         
         # 使用游标分页或切片进行分批处理
-        # 这里使用切片，对于几万条数据是可以接受的
         for start in range(0, total_count, batch_size):
             end = min(start + batch_size, total_count)
             # 获取当前批次的数据
-            batch_results = task.related_results.all().order_by('id')[start:end]
+            batch_results = results_qs[start:end]
             batch_data = OCRResultSerializer(batch_results, many=True).data
             
             # 处理当前批次的图片转Base64
             for item in batch_data:
-                # 定义压缩函数
-                def compress_image(path):
-                    if not path: return ""
-                    abs_path = os.path.join(settings.MEDIA_ROOT, path)
-                    if not os.path.exists(abs_path): return ""
-                    
-                    try:
-                        with Image.open(abs_path) as img:
-                            buffer = io.BytesIO()
-                            # 优先尝试 WebP 格式 (体积小且质量好，特别适合带文字的截图)
-                            try:
-                                # 如果是 RGBA 模式，WebP 可以保留透明度；如果是其他模式转 RGB
-                                if img.mode not in ('RGB', 'RGBA'):
-                                    img = img.convert('RGB')
-                                
-                                # quality=75: 视觉无损
-                                # method=4: 默认压缩速度/质量平衡
-                                img.save(buffer, format="WEBP", quality=75, method=4)
-                                mime_type = "image/webp"
-                            except Exception:
-                                # 回退到 JPEG
-                                buffer.seek(0)
-                                buffer.truncate()
-                                if img.mode != 'RGB':
-                                    img = img.convert('RGB')
-                                # quality=75: 保证清晰度
-                                # subsampling=0: 关闭色度抽样，防止文字边缘颜色失真(变红/变糊)
-                                # optimize=True: 优化 Huffman 表，减小体积
-                                img.save(buffer, format="JPEG", quality=75, optimize=True, subsampling=0)
-                                mime_type = "image/jpeg"
-                                
-                            img_str = base64.b64encode(buffer.getvalue()).decode()
-                            return f"data:{mime_type};base64,{img_str}"
-                    except Exception as e:
-                        logger.error(f"图片处理失败 {abs_path}: {e}")
-                        return ""
-
                 # 处理原图
                 item['image_url'] = compress_image(item.get('image_path'))
                 
@@ -1263,12 +1306,35 @@ def export_offline_html_task(task_id: str):
             'ocrIsTranslatedEnum': enum_to_dict(ocrIsTranslatedEnum),
         }
 
+        # 读取静态资源文件内容，用于离线报告嵌入
+        # 静态文件位于 apps/ocr/templates/ocr/ 目录下
+        template_dir = os.path.join(settings.BASE_DIR, 'apps', 'ocr', 'templates', 'ocr')
+        
+        def read_static_content(filename):
+            try:
+                file_path = os.path.join(template_dir, filename)
+                if os.path.exists(file_path):
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        return f.read()
+                logger.warning(f"离线报告静态资源未找到: {file_path}")
+                return ""
+            except Exception as e:
+                logger.error(f"读取静态资源失败 {filename}: {e}")
+                return ""
+
         # 渲染模板
         context = {
+            # 嵌入静态资源
+            'vue_js': read_static_content('vue.global.prod.js'),
+            'element_css': read_static_content('element-plus.index.css'),
+            'element_js': read_static_content('element-plus.index.min.js'),
+            'element_icons_js': read_static_content('element-plus.icons-vue.js'),
+            # 数据
             'task': task_data,
             'task_json': json.dumps(task_data),
             'results_json': json.dumps(results_data),
-            'enums_json': json.dumps(enums_data)
+            'enums_json': json.dumps(enums_data),
+            'filter_data_json': json.dumps(filter_data or {}),
         }
         
         html_content = render_to_string('ocr/offline_report.html', context)
@@ -1276,7 +1342,10 @@ def export_offline_html_task(task_id: str):
         # 保存文件
         report_dir = PathUtils.get_ocr_reports_dir()
         os.makedirs(report_dir, exist_ok=True)
-        file_name = f"ocr_report_{task.id}_offline.html"
+        
+        if not file_name:
+            file_name = f"ocr_report_{task.id}_offline.html"
+            
         file_path = os.path.join(report_dir, file_name)
         
         with open(file_path, 'w', encoding='utf-8') as f:
@@ -1285,12 +1354,12 @@ def export_offline_html_task(task_id: str):
         logger.info(f"离线报告生成成功: {file_path}")
         
         # 发送通知（可选，如果前端通过轮询或SSE接收）
-        notify_ocr_task_progress({
-            "id": task_id,
-            "offline_report_url": f"/media/ocr/reports/{file_name}",
+        send_message({
+            "task_id": task_id,
+            "url": f"ocr/reports/{file_name}",
             "msg": "离线报告生成成功"
-        })
-        
+        }, SSEEvent.OCR_REPORT_EXPORT.value)
+
     except Exception as e:
         logger.error(f"导出离线报告失败: {e}")
         logger.error(traceback.format_exc())

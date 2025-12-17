@@ -75,7 +75,9 @@ export const navigateToSSOLogin = () => {
     nextPath = "/";
   }
   const redirect = encodeURIComponent(
-    `${url.protocol}//${url.host}/#/login?next=${encodeURIComponent(nextPath)}`
+    `${url.protocol}//${url.host}${
+      url.pathname
+    }#/login?next=${encodeURIComponent(nextPath)}`
   );
   window.location.href = `${VITE_SSO_HOST}/?redirect=${redirect}#/sso-login`;
 };

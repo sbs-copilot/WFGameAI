@@ -139,11 +139,15 @@ export function useActionSettings() {
   ) => {
     try {
       param.action_type = actionType.id; // 确保 action_type ID 正确
+
+      // 构造提交数据，后端 ActionParamSerializer 需要 action_library 字段
+      const submitData = { ...param, action_library: actionType.id };
+
       if (param.id) {
-        await actionParamApi.update(param);
+        await actionParamApi.update(submitData as any);
         ElMessage.success("参数更新成功");
       } else {
-        const res = await actionParamApi.create(param);
+        const res = await actionParamApi.create(submitData as any);
         param.id = res.data.id; // 更新ID
         ElMessage.success("参数创建成功");
       }

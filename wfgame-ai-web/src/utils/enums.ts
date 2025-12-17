@@ -82,14 +82,14 @@ export const ocrResultTypeEnum: Record<string, EnumValue> = {
     order: 3,
     type: "danger",
     color: "#faa7a7ff"
-  } // 更深的浅红色
-  // MISSING: {
-  //   label: "漏检",
-  //   value: 3,
-  //   order: 4,
-  //   type: "warning",
-  //   color: "#ddbc04ff"
-  // } // 更深的浅黄色
+  }, // 更深的浅红色
+  IGNORE: {
+    label: "忽略",
+    value: 3,
+    order: 4,
+    type: "warning",
+    color: "#ddbc04ff"
+  } // 更深的浅黄色
 };
 
 /** OCR 识别结果是否审核 */
@@ -126,12 +126,12 @@ export const ocrIsTranslatedEnum: Record<string, EnumValue> = {
 export const ocrIsMatchEnum: Record<string, EnumValue> = {
   ALL: { label: "全部", value: null, order: 1, type: "info" },
   MATCH: {
-    label: "已匹配",
+    label: "有文字",
     value: true,
     order: 2
   },
   UNMATCH: {
-    label: "未匹配",
+    label: "无文字",
     value: false,
     order: 3
   }

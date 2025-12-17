@@ -2,6 +2,8 @@
 OCR模块数据模型
 """
 import difflib
+import os
+from typing import Optional
 
 from django.db import models
 from django.db.models import Q
@@ -10,7 +12,9 @@ import datetime
 from django.db.models import QuerySet
 
 from apps.core.models.common import CommonFieldsMixin
+from utils.minio_helper import batch_upload_file_deduplicated
 from django.db import transaction
+from django.conf import settings
 
 
 def generate_task_id():
@@ -240,13 +244,45 @@ class OCRTask(CommonFieldsMixin):
         if updates:
             OCRResult.objects.bulk_update(updates, fields=['similarity_score', 'ground_truth_origin_id'])
 
+    @staticmethod
+    def upload_images_to_minio(task_id: str, include_cache_hits: bool = False) -> dict:
+        """
+        上传OCR任务的图片到MinIO存储
+        :param task_id: OCR任务ID
+        :param include_cache_hits: 是否包含缓存命中的结果图片
+        """
+        task: Optional[OCRTask] = OCRTask.objects.all_teams().filter(id=task_id).first()
+        if not task:
+            raise ValueError(f"OCR Task with ID {task_id} not found.")
+
+        bucket = settings.CFG.get("minio", "default_bucket", "wfgame-ai")
+        minio_dir = "ocr_images"
+
+        if include_cache_hits:
+            results = task.related_results.only("image_path", "image_hash")
+        else:
+            results = task.results.for_team(task.team_id).only("image_path", "image_hash")
+
+        to_uploads = [
+            (os.path.join(settings.MEDIA_ROOT, result.image_path), f"{minio_dir}/{result.image_hash}")
+            for result in results
+        ]
+
+        return batch_upload_file_deduplicated(bucket, to_uploads)
+
 
 
 class OCRResult(CommonFieldsMixin):
+
+    RIGHT = 1
+    WRONG = 2
+    IGNORE = 3
+
     """OCR结果模型"""
     TYPE_CHOICES = (
-        (1, "正确"),    # 完全正确
-        (2, "错误"),    # 合并错误类型
+        (RIGHT, "正确"),    # 完全正确
+        (WRONG, "错误"),    # 合并错误类型
+        (IGNORE, "忽略"),    # 忽略
     )
 
     task = models.ForeignKey(
@@ -363,13 +399,30 @@ class OCRResult(CommonFieldsMixin):
                 result.is_verified = True
                 result.result_type = result_type
 
-                if result_type == 1:
-                    # 正确
+                if result_type == cls.RIGHT:
+                    # 人工审核：正确
+                    # 1. 清空可能存在的矫正文本
+                    # 2. 更新 Cache 指向当前结果
+                    # 3. 根据机器识别结果 texts 更新 has_match
                     result.corrected_texts = []
                     cache_update_map[result.image_hash] = result.id
                     result.has_match = any(result.texts or [])
+                elif result_type == cls.IGNORE:
+                    # 人工审核：忽略
+                    # 1. 清空可能存在的矫正文本
+                    # 2. 备份一份机器识别结果到 remark
+                    # 3. 更新 Cache 指向当前结果
+                    # 4. 强制 has_match 为 False
+                    result.corrected_texts = []
+                    result.remark = f"{result.texts}"
+                    cache_update_map[result.image_hash] = result.id
+                    result.has_match = False
                 else:
-                    # 误检/漏检
+                    # 人工审核：错误
+                    # 1. 使用人工矫正文本
+                    # 2. 更新或创建副本记录
+                    # 3. 更新 Cache 指向副本记录
+
                     result.corrected_texts = corrected_texts
                     result.has_match = any(result.corrected_texts or [])
 
@@ -410,7 +463,7 @@ class OCRResult(CommonFieldsMixin):
 
             # 3. 执行批量更新/插入
             if results_to_update:
-                cls.objects.bulk_update(results_to_update, ['is_verified', 'result_type', 'corrected_texts', 'has_match'])
+                cls.objects.bulk_update(results_to_update, ['is_verified', 'result_type', 'corrected_texts', 'has_match', 'remark'])
 
             if copies_to_update:
                 cls.objects.bulk_update(copies_to_update, ['texts', 'is_verified', 'result_type', 'corrected_texts', 'has_match'])

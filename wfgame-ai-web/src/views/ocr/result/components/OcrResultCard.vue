@@ -1,5 +1,9 @@
 <template>
-  <el-card shadow="always" class="result-card">
+  <el-card
+    shadow="always"
+    class="result-card"
+    :class="{ 'is-ignored': isIgnored }"
+  >
     <div class="card-content cursor-pointer">
       <div
         class="image-container"
@@ -9,17 +13,20 @@
       >
         <div class="image-wrapper">
           <el-image
-            :title="mediaUrl(result.image_path)"
+            :title="ocrImageUrl(result.image_hash)"
             :style="{
               width: '100%',
               height: showTransImage ? '180px' : '180px'
             }"
-            :src="mediaUrl(result.image_path)"
+            :src="ocrImageUrl(result.image_hash)"
             fit="scale-down"
             lazy
             @click="handleImageClick(result, 'original')"
           />
           <div v-if="showTransImage" class="image-label original">原图</div>
+          <div v-if="isIgnored" class="ignored-overlay">
+            <span>已忽略</span>
+          </div>
         </div>
         <div v-if="showTransImage" class="image-wrapper">
           <el-image
@@ -50,7 +57,11 @@
         </div>
       </div>
       <div class="info-container">
-        <h3 class="image-name" :title="getImgName(result.image_path)">
+        <h3
+          class="image-name"
+          :title="result.image_path"
+          @click="handleCopyText(result.image_path)"
+        >
           {{ getImgName(result.image_path) }}
         </h3>
         <p class="info-item">
@@ -62,7 +73,9 @@
               'text-primary font-semibold':
                 result.result_type == ocrResultTypeEnum.RIGHT.value,
               'line-through text-red-300':
-                result.result_type == ocrResultTypeEnum.WRONG.value
+                result.result_type == ocrResultTypeEnum.WRONG.value,
+              'text-gray-400':
+                result.result_type == ocrResultTypeEnum.IGNORE.value
             }"
           >
             {{ getResultText(result) || "-" }}
@@ -83,7 +96,10 @@
         </p>
         <p class="info-item">
           最大置信度:
-          <span>
+          <span v-if="result.result_type === ocrResultTypeEnum.IGNORE.value"
+            >-</span
+          >
+          <span v-else>
             {{ result.max_confidence || "-" }}
           </span>
         </p>
@@ -98,12 +114,6 @@
           <span>
             {{ result.languages || "-" }}
           </span>
-        </p>
-        <p v-if="false" class="info-item" :title="result.image_path">
-          路径:
-          <a :href="mediaUrl(result.image_path)" target="_blank">
-            {{ result.image_path || "-" }}
-          </a>
         </p>
         <p v-if="false" class="info-item" :title="result.image_path">
           哈希值:
@@ -132,6 +142,19 @@
             {{ item.label }}
           </el-radio-button>
         </el-radio-group>
+        <div
+          class="flex items-center justify-center mt-3"
+          v-if="result.is_verified && result.updater_name"
+        >
+          <div
+            class="flex items-center text-xs text-gray-400 bg-gray-50 px-3 py-1 rounded-full border border-gray-100"
+          >
+            <el-icon class="mr-1" :size="12"><User /></el-icon>
+            <span :title="`ID:${result.id}`"
+              >审核: {{ result.updater_name }}</span
+            >
+          </div>
+        </div>
         <VerifiedSVG
           v-if="result.is_verified"
           class="is_verified"
@@ -147,9 +170,9 @@ import { type OcrResult, ocrResultApi } from "@/api/ocr";
 import { ocrResultTypeEnum } from "@/utils/enums";
 import { ref, computed } from "vue";
 import { superRequest } from "@/utils/request";
-import { mediaUrl } from "@/api/utils";
+import { ocrImageUrl, mediaUrl } from "@/api/utils";
 import { copyText } from "@/utils/utils";
-import { Picture } from "@element-plus/icons-vue";
+import { Picture, User } from "@element-plus/icons-vue";
 
 import VerifiedSVG from "@/assets/svg/verified.svg?component";
 
@@ -171,6 +194,10 @@ const showTransImage = computed(() => {
   return props.showTranslation && props.result.is_translated;
 });
 
+const isIgnored = computed(() => {
+  return props.result.result_type === ocrResultTypeEnum.IGNORE.value;
+});
+
 const currentResultType = ref(props.result.result_type);
 
 const resultTypes = computed(() => {
@@ -179,6 +206,9 @@ const resultTypes = computed(() => {
 
 const getResultText = (result: OcrResult) => {
   if (!result.texts) return "";
+  if (result.result_type === ocrResultTypeEnum.IGNORE.value) {
+    return "";
+  }
   if (Array.isArray(result.texts)) {
     const texts = result.texts.map(s => s).join("");
     return texts;
@@ -221,9 +251,6 @@ const submitUpdate = (newType: number) => {
     is_verified: true
   };
 
-  // 先发送 emit 事件给父组件
-  emit("update:result", updates);
-
   const params: any = {
     id: props.result.id,
     task_id: props.taskId,
@@ -234,8 +261,11 @@ const submitUpdate = (newType: number) => {
   superRequest({
     apiFunc: ocrResultApi.verify,
     apiParams: params,
-    onSucceed: () => {
+    onSucceed: data => {
       currentResultType.value = newType;
+      updates.updater_name = data.updater_name;
+      // 先发送 emit 事件给父组件
+      emit("update:result", updates);
     },
     onFailed: () => {
       // API 调用失败时，发送原来的值给父组件（回滚）
@@ -374,5 +404,44 @@ const handleResultTypeChange = async (newType: number) => {
   :deep(.el-radio-button:first-child .el-radio-button__inner) {
     border-left: 1px solid #dcdfe6;
   }
+}
+
+.result-card.is-ignored {
+  opacity: 0.75;
+  background-color: #e0e0e0;
+  border-color: #d6d6d6;
+  filter: grayscale(0.9);
+  transition: all 0.3s ease;
+
+  &:hover {
+    background-color: transparent;
+    opacity: 0.9;
+    filter: grayscale(0);
+  }
+}
+
+.ignored-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(255, 255, 255, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ignored-overlay span {
+  background-color: rgba(144, 147, 153, 0.9);
+  color: white;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 14px;
+  font-weight: bold;
+  box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+  letter-spacing: 1px;
 }
 </style>

@@ -68,7 +68,9 @@ class OCRResultSerializer(serializers.ModelSerializer):
             "created_at",
             "result_type",
             "pic_resolution",
-            "is_verified"
+            "is_verified",
+            "updater_id",
+            "updater_name"
         ]
 
 

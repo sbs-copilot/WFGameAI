@@ -5,6 +5,16 @@
         <template #content>
           <h3>OCR 识别报告</h3>
         </template>
+        <template #extra>
+          <el-link
+            class="ml-auto"
+            type="primary"
+            :href="verifyDescUrl"
+            target="_blank"
+          >
+            审核说明手册
+          </el-link>
+        </template>
       </el-page-header>
     </template>
     <el-scrollbar ref="scrollbarRef" class="h-full">
@@ -211,6 +221,8 @@ import { ElMessageBox, ElMessage } from "element-plus";
 import { useNavigate } from "@/views/common/utils/navHook";
 import { useSSE, SSEEvent } from "@/layout/components/sseState/useSSE";
 import { debounce } from "@/utils/utils";
+
+const verifyDescUrl = "https://ai.feishu.cn/wiki/JVdYwxDTyi1lNCkcKfOcWLk1nMb";
 
 const { on } = useSSE();
 // 监听 OCR 任务更新事件

@@ -4,7 +4,7 @@ export interface ApiResult {
   data?: any;
 }
 
-const { VITE_BACKEND_HOST, VITE_MEDIA_HOST } = import.meta.env;
+const { VITE_BACKEND_HOST, VITE_MEDIA_HOST, VITE_MINIO_HOST } = import.meta.env;
 
 const CustomBackendHostKey = "customBackendHost";
 
@@ -45,9 +45,18 @@ export const getCurrentBackendHost = (): string => {
   return customBackendHost || VITE_BACKEND_HOST;
 };
 
+const mediaHost = ensureHostEndsWithSlash(
+  VITE_MEDIA_HOST || window.location.origin
+);
+
 export const mediaUrl = (path: string): string => {
-  const host = ensureHostEndsWithSlash(
-    VITE_MEDIA_HOST || window.location.origin
-  );
-  return `${host}media/${path}`;
+  return `${mediaHost}media/${path}`;
+};
+
+const minioHost = ensureHostEndsWithSlash(
+  VITE_MINIO_HOST || window.location.origin
+);
+
+export const ocrImageUrl = (imageHash: string): string => {
+  return `${minioHost}wfgame-ai/ocr_images/${imageHash}`;
 };

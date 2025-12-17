@@ -43,7 +43,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <MainContent title="设备管理">
+  <MainContent title="设备管理" scroll-mode>
     <!-- 头部拓展功能 -->
     <template #header-extra>
       <div class="flex items-center justify-between">

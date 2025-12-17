@@ -4,30 +4,56 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OCR 离线报告 - {{ task.id }}</title>
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/element-plus/dist/index.css"
-    />
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <script src="https://unpkg.com/element-plus"></script>
-    <script src="https://unpkg.com/@element-plus/icons-vue"></script>
+    <style>
+      {{ element_css|safe }}
+    </style>
+    <script>
+      {{ vue_js|safe }}
+    </script>
+    <script>
+      {{ element_js|safe }}
+    </script>
+    <script>
+      {{ element_icons_js|safe }}
+    </script>
     <style>
       body {
         margin: 0;
-        padding: 20px;
+        padding: 0;
         background-color: #f5f7fa;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
           "Helvetica Neue", Arial, sans-serif;
+        height: 100vh;
+        overflow: hidden;
       }
-      .filter-card {
-        margin-bottom: 16px;
+      #app {
+        height: 100%;
       }
+      .main-container {
+        height: 100%;
+      }
+      .header-container {
+        background-color: #fff;
+        border-bottom: 1px solid #dcdfe6;
+        padding: 10px 20px;
+        height: auto !important;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        z-index: 10;
+      }
+      .content-container {
+        padding: 20px;
+        overflow-y: auto;
+        background-color: #f0f2f5;
+      }
+      
+      /* Filter Styles */
       .filter-toolbar {
         display: flex;
         justify-content: space-between;
         align-items: center;
         flex-wrap: wrap;
         gap: 16px;
+        margin-top: 10px;
       }
       .filter-groups-left {
         display: flex;
@@ -45,33 +71,22 @@
         margin-right: 6px;
         font-weight: 500;
       }
-      .filter-actions {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-      }
-      .advanced-filter-panel {
-        margin-top: 20px;
-        padding-top: 20px;
-        border-top: 1px solid #f0f2f5;
-      }
-      .filter-groups-advanced {
-        display: flex;
-        align-items: center;
-        flex-wrap: wrap;
-        gap: 24px;
-      }
 
+      /* Card Styles */
       .card-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
         gap: 16px;
       }
       .result-card {
         height: 100%;
         display: flex;
         flex-direction: column;
-        transition: background-color 0.3s;
+        transition: all 0.3s;
+      }
+      .result-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
       }
       .result-card .el-card__body {
         padding: 0;
@@ -89,482 +104,497 @@
         padding: 6px;
         border-bottom: 1px solid #e4e7ed;
         position: relative;
+        background-color: #f5f7fa;
       }
       .image-wrapper {
         position: relative;
-        height: 180px;
+        height: 200px;
         width: 100%;
         display: flex;
         justify-content: center;
         align-items: center;
-        background: #f5f7fa;
         overflow: hidden;
       }
-      .image-label {
-        position: absolute;
-        top: 6px;
-        right: 6px;
-        font-size: 12px;
-        padding: 4px 8px;
-        border-radius: 4px;
-        z-index: 1;
-        backdrop-filter: blur(4px);
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-        font-weight: 500;
-      }
-      .image-label.original {
-        background-color: rgba(255, 255, 255, 0.85);
-        color: #606266;
-      }
-      .image-label.translated {
-        background-color: rgba(236, 245, 255, 0.9);
-        color: #81c0ff;
-      }
-
       .info-container {
-        padding: 14px;
+        padding: 12px;
         flex: 1;
         display: flex;
         flex-direction: column;
-        overflow: hidden;
-        position: relative;
+        gap: 8px;
       }
       .image-name {
-        font-size: 16px;
+        font-size: 15px;
         font-weight: bold;
-        margin: 0 0 10px;
+        margin: 0;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        color: #303133;
       }
-      .info-item {
-        font-size: 12px;
-        margin: 2px 0;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        color: grey;
+      .ocr-text-box {
+        background-color: #f5f7fa;
+        padding: 8px;
+        border-radius: 4px;
+        font-size: 13px;
+        color: #606266;
+        min-height: 40px;
+        max-height: 80px;
+        overflow-y: auto;
+        border: 1px solid #e4e7ed;
       }
-      .text-primary {
-        color: #409eff;
-      }
-      .text-red-300 {
-        color: #fca5a5;
-        text-decoration: line-through;
-      }
-      .font-semibold {
-        font-weight: 600;
-      }
-      .result-type-radios {
+      .translation-input {
         margin-top: auto;
-        padding-top: 10px;
-        margin-left: auto;
-        margin-right: auto;
       }
-      .is_verified {
+      .action-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #ebeef5;
+      }
+      
+      /* Ignored State */
+      .result-card.is-ignored {
+        opacity: 0.75;
+        background-color: #e0e0e0;
+        border-color: #d6d6d6;
+        filter: grayscale(0.9);
+        transition: all 0.3s ease;
+      }
+      .result-card.is-ignored:hover {
+        opacity: 0.9;
+        filter: grayscale(0);
+      }
+      
+      .ignored-overlay {
         position: absolute;
-        top: 46px;
-        right: 4px;
-        width: 80px;
-        height: 80px;
-        opacity: 0.2;
-        z-index: 0;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(255, 255, 255, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 2;
         pointer-events: none;
       }
 
+      .ignored-overlay span {
+        background-color: rgba(144, 147, 153, 0.9);
+        color: white;
+        padding: 6px 16px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: bold;
+        box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+        letter-spacing: 1px;
+      }
+      
       .pagination-wrapper {
         margin-top: 20px;
         display: flex;
         justify-content: flex-end;
+        background-color: #fff;
+        padding: 10px;
+        border-radius: 4px;
       }
-      .mb-4 {
-        margin-bottom: 1rem;
-      }
-      .mr-1 {
-        margin-right: 0.25rem;
-      }
-      .flex-col {
-        flex-direction: column;
-      }
-      .flex {
-        display: flex;
-      }
-
-      /* Task Info Styles */
-      .task-info-card {
-        margin-bottom: 16px;
-      }
+      
       .desc-label {
         font-weight: bold;
         color: #606266;
       }
-      .json-content {
-        background-color: #fafafa;
-        padding: 10px;
-        border-radius: 4px;
-        font-family: Consolas, monospace;
-        font-size: 12px;
-        white-space: pre-wrap;
-        word-break: break-all;
-        max-height: 200px;
-        overflow-y: auto;
-      }
     </style>
+    <!-- 数据注入点 -->
+    <script id="data-injection">
+      window.__LOCAL_DATA__ = null;
+    </script>
+    <script id="config-injection">
+      window.__LOCAL_CONFIG__ = null;
+    </script>
   </head>
   <body>
-    <div id="app">
-      {% verbatim %}
-      <!-- 任务信息 -->
-      <el-card class="task-info-card">
-        <template #header>
-          <div
-            style="
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-            "
-          >
-            <h3>OCR 识别报告 - 离线版</h3>
-            <el-tag>{{ task.status }}</el-tag>
-          </div>
-        </template>
-        <el-descriptions :column="4" border>
-          <el-descriptions-item label="任务ID" label-class-name="desc-label"
-            >{{ task.id }}</el-descriptions-item
-          >
-          <el-descriptions-item label="总图片数" label-class-name="desc-label"
-            >{{ task.total_images }}</el-descriptions-item
-          >
-          <el-descriptions-item label="匹配数" label-class-name="desc-label"
-            >{{ task.matched_images }}</el-descriptions-item
-          >
-          <el-descriptions-item label="匹配率" label-class-name="desc-label"
-            >{{ task.match_rate }}%</el-descriptions-item
-          >
-          <el-descriptions-item label="创建时间" label-class-name="desc-label"
-            >{{ formatTime(task.created_at) }}</el-descriptions-item
-          >
-          <el-descriptions-item label="耗时" label-class-name="desc-label"
-            >{{ task.duration || '-' }}</el-descriptions-item
-          >
-          <el-descriptions-item
-            label="备注"
-            :span="2"
-            label-class-name="desc-label"
-            >{{ task.remark || '-' }}</el-descriptions-item
-          >
-        </el-descriptions>
-        <el-collapse style="margin-top: 10px">
-          <el-collapse-item title="查看任务配置参数">
-            <pre class="json-content">
-{{ JSON.stringify(task.config, null, 2) }}</pre
-            >
-          </el-collapse-item>
-        </el-collapse>
-      </el-card>
+    <div id="app">Loading...</div>
 
-      <!-- 筛选器 -->
-      <el-card class="filter-card" shadow="never">
-        <div class="filter-toolbar">
-          <div class="filter-groups-left">
-            <div class="filter-group-item">
-              <span class="label-text">匹配状态：</span>
-              <el-radio-group
-                v-model="filterData.has_match"
-                @change="handleSearch"
-              >
-                <el-radio-button :label="null">全部</el-radio-button>
-                <el-radio-button :label="true">已匹配</el-radio-button>
-                <el-radio-button :label="false">未匹配</el-radio-button>
-              </el-radio-group>
+    <!-- ========================================== -->
+    <!-- 数据注入区 (Data Islands) -->
+    <!-- 使用 type="application/json" 避免 JS 语法错误 -->
+    <!-- ========================================== -->
+    <script type="application/json" id="dj-data-task">
+      {{ task_json|safe }}
+    </script>
+    <script type="application/json" id="dj-data-results">
+      {{ results_json|safe }}
+    </script>
+    <script type="application/json" id="dj-data-filter">
+      {{ filter_data_json|safe }}
+    </script>
+    <script type="application/json" id="dj-data-enums">
+      {{ enums_json|safe }}
+    </script>
+
+    {% verbatim %}
+    <script type="text/x-template" id="app-template">
+      <el-container class="main-container">
+        <el-header class="header-container">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <h3 style="margin: 0;">OCR 离线报告</h3>
+                    <el-tag size="small">{{ task.id }}</el-tag>
+                    <el-tag size="small" type="info">生成时间: {{ formatTime(new Date()) }}</el-tag>
+                    <el-button type="primary" link @click="showFilterInfo = !showFilterInfo">
+                        {{ showFilterInfo ? '隐藏导出条件' : '查看导出条件' }}
+                    </el-button>
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <el-button type="success" @click="saveToFile">
+                        保存更改到文件
+                    </el-button>
+                </div>
             </div>
-            <div class="filter-group-item">
-              <span class="label-text">翻译状态：</span>
-              <el-radio-group
-                v-model="filterData.is_translated"
-                @change="handleSearch"
-              >
-                <el-radio-button :label="null">全部</el-radio-button>
-                <el-radio-button :label="true">已翻译</el-radio-button>
-                <el-radio-button :label="false">未翻译</el-radio-button>
-              </el-radio-group>
+            
+            <el-collapse-transition>
+                <div v-show="showFilterInfo" style="margin-top: 10px; margin-bottom: 10px; border-top: 1px solid #ebeef5; padding-top: 10px;">
+                    <el-descriptions title="本次导出筛选条件" :column="4" border size="small">
+                        <el-descriptions-item label="匹配状态" label-class-name="desc-label">
+                            {{ formatFilterValue(exportFilterData.has_match, '匹配') }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="翻译状态" label-class-name="desc-label">
+                            {{ formatFilterValue(exportFilterData.is_translated, '翻译') }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="审核状态" label-class-name="desc-label">
+                            {{ formatFilterValue(exportFilterData.is_verified, '审核') }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="结果标记" label-class-name="desc-label">
+                            {{ getResultTypeLabel(exportFilterData.result_type) }}
+                        </el-descriptions-item>
+                        <el-descriptions-item label="关键字" label-class-name="desc-label" :span="4">
+                            {{ exportFilterData.keyword || '无' }}
+                        </el-descriptions-item>
+                    </el-descriptions>
+                </div>
+            </el-collapse-transition>
+
+            <div class="filter-toolbar">
+                <div class="filter-groups-left">
+                    <div class="filter-group-item">
+                        <el-input
+                            v-model="filterData.keyword"
+                            placeholder="搜索文件名..."
+                            :prefix-icon="Search"
+                            clearable
+                            style="width: 240px"
+                            @input="handleSearch"
+                        />
+                    </div>
+                    <div class="filter-group-item">
+                        <span class="label-text">需要翻译：</span>
+                        <el-radio-group v-model="filterData.noTranslation" @change="handleSearch">
+                            <el-radio-button :label="null">全部 ({{ counts.total }})</el-radio-button>
+                            <el-radio-button :label="false">是 ({{ counts.needTrans }})</el-radio-button>
+                            <el-radio-button :label="true">否 ({{ counts.noNeedTrans }})</el-radio-button>
+                        </el-radio-group>
+                    </div>
+                    <div class="filter-group-item">
+                        <span class="label-text">已填写翻译：</span>
+                        <el-radio-group v-model="filterData.hasTranslation" @change="handleSearch">
+                            <el-radio-button :label="null">全部 ({{ counts.total }})</el-radio-button>
+                            <el-radio-button :label="true">是 ({{ counts.hasTrans }})</el-radio-button>
+                            <el-radio-button :label="false">否 ({{ counts.noHasTrans }})</el-radio-button>
+                        </el-radio-group>
+                    </div>
+                </div>
+                <div class="filter-actions">
+                    <el-button :icon="RefreshLeft" circle @click="handleReset" title="重置筛选"></el-button>
+                </div>
             </div>
-            <div class="filter-group-item">
-              <span class="label-text">置信区间：</span>
-              <div style="width: 160px; padding: 0 10px">
-                <el-slider
-                  v-model="confidenceRange"
-                  range
-                  :min="0"
-                  :max="1"
-                  :step="0.01"
-                  @change="handleSearch"
+        </el-header>
+
+        <el-main class="content-container">
+            <div class="card-grid">
+                <div v-for="item in paginatedResults" :key="item.id">
+                    <el-card shadow="hover" class="result-card" :class="{ 'is-ignored': isNoTranslation(item.id) }">
+                        <div class="card-content">
+                            <div class="image-container">
+                                <div class="image-wrapper">
+                                    <el-image
+                                        :src="item.image_url"
+                                        :preview-src-list="[item.image_url]"
+                                        fit="contain"
+                                        lazy
+                                        style="width: 100%; height: 100%"
+                                        hide-on-click-modal
+                                        :preview-teleported="true"
+                                    ></el-image>
+                                    <div v-if="isNoTranslation(item.id)" class="ignored-overlay">
+                                        <span>无需翻译</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="info-container">
+                                <div style="display: flex; justify-content: space-between; align-items: center;">
+                                    <div class="image-name" :title="getImgName(item.image_path)">
+                                        {{ getImgName(item.image_path) }}
+                                    </div>
+                                </div>
+                                
+                                <div style="display: flex; align-items: center; gap: 5px; margin-bottom: 5px;">
+                                    <el-button 
+                                        size="small" 
+                                        type="primary" 
+                                        plain
+                                        @click="handleCopyLocalCommand(item.image_path)"
+                                        title="复制打开命令 (Win+R 粘贴即可打开文件夹并选中文件)"
+                                        style="padding: 5px 8px;"
+                                    >
+                                        <el-icon style="margin-right: 4px;"><FolderOpened /></el-icon>
+                                        本地定位
+                                    </el-button>
+                                    
+                                    <el-tooltip content="设置本地仓库根目录" placement="top">
+                                        <el-button 
+                                            size="small" 
+                                            circle 
+                                            @click="handleSetLocalRoot"
+                                            style="padding: 5px;"
+                                        >
+                                            <el-icon><Setting /></el-icon>
+                                        </el-button>
+                                    </el-tooltip>
+                                </div>
+                                
+                                <div v-if="false" class="ocr-text-box" title="OCR识别文本">
+                                    {{ getResultText(item) || "（无识别文本）" }}
+                                </div>
+
+                                <div class="translation-input">
+                                    <el-input
+                                        v-model="localData[item.id].translation"
+                                        type="textarea"
+                                        :rows="2"
+                                        placeholder="请输入翻译文本..."
+                                        :disabled="isNoTranslation(item.id)"
+                                    ></el-input>
+                                </div>
+
+                                <div class="action-bar">
+                                    <el-radio-group v-model="localData[item.id].noTranslation" size="">
+                                        <el-radio-button :label="false">✅需要翻译</el-radio-button>
+                                        <el-radio-button :label="true">❌无需翻译</el-radio-button>
+                                    </el-radio-group>
+                                    <el-tag size="" type="info">{{ item.pic_resolution || '未知分辨率' }}</el-tag>
+                                </div>
+                            </div>
+                        </div>
+                    </el-card>
+                </div>
+            </div>
+
+            <div class="pagination-wrapper">
+                <el-pagination
+                    v-model:current-page="pagination.currentPage"
+                    v-model:page-size="pagination.pageSize"
+                    :total="pagination.total"
+                    :page-sizes="[20, 50, 100, 200]"
+                    layout="total, sizes, prev, pager, next, jumper"
+                    @size-change="handleSizeChange"
+                    @current-change="handlePageChange"
+                    background
                 />
-              </div>
             </div>
-          </div>
-
-          <div class="filter-actions">
-            <el-input
-              style="width: 200px"
-              v-model="filterData.keyword"
-              placeholder="搜索关键字..."
-              :prefix-icon="Search"
-              clearable
-              @input="handleSearch"
-            />
-            <el-button
-              :type="hasActiveFilters ? 'primary' : 'default'"
-              @click="toggleExpand"
-            >
-              <el-icon class="mr-1"><Filter /></el-icon> 更多筛选
-              <el-icon class="el-icon--right">
-                <component :is="isExpanded ? 'ArrowUp' : 'ArrowDown'" />
-              </el-icon>
-            </el-button>
-            <el-button
-              :icon="RefreshLeft"
-              circle
-              @click="handleReset"
-              title="重置"
-            ></el-button>
-          </div>
-        </div>
-
-        <div v-show="isExpanded" class="advanced-filter-panel">
-          <div class="filter-groups-advanced">
-            <div class="filter-group-item">
-              <span class="label-text">审核状态：</span>
-              <el-radio-group
-                v-model="filterData.is_verified"
-                @change="handleSearch"
-              >
-                <el-radio-button :label="null">全部</el-radio-button>
-                <el-radio-button :label="true">已审核</el-radio-button>
-                <el-radio-button :label="false">未审核</el-radio-button>
-              </el-radio-group>
-            </div>
-            <div class="filter-group-item">
-              <span class="label-text">结果标记：</span>
-              <el-radio-group
-                v-model="filterData.result_type"
-                @change="handleSearch"
-              >
-                <el-radio-button label="">全部</el-radio-button>
-                <el-radio-button
-                  v-for="item in sortedEnum(enums.ocrResultTypeEnum)"
-                  :key="item.value"
-                  :label="item.value"
-                >
-                  {{ item.label }}
-                </el-radio-button>
-              </el-radio-group>
-            </div>
-          </div>
-        </div>
-      </el-card>
-
-      <!-- 列表 -->
-      <div class="card-grid">
-        <div v-for="item in paginatedResults" :key="item.id">
-          <el-card shadow="always" class="result-card">
-            <div class="card-content">
-              <div
-                class="image-container"
-                :class="{ 'flex flex-col': showTransImage(item) }"
-              >
-                <div class="image-wrapper">
-                  <el-image
-                    :src="item.image_url"
-                    :preview-src-list="getPreviewList(item)"
-                    hide-on-click-modal
-                    fit="scale-down"
-                    lazy
-                    style="width: 100%; height: 100%"
-                  ></el-image>
-                  <div v-if="showTransImage(item)" class="image-label original">
-                    原图
-                  </div>
-                </div>
-                <div
-                  v-if="showTransImage(item)"
-                  class="image-wrapper"
-                  style="margin-top: 6px"
-                >
-                  <el-image
-                    :src="item.trans_image_url"
-                    :preview-src-list="getPreviewList(item)"
-                    fit="scale-down"
-                    lazy
-                    style="width: 100%; height: 100%"
-                  ></el-image>
-                  <div class="image-label translated">翻译</div>
-                </div>
-              </div>
-
-              <div class="info-container">
-                <h3 class="image-name" :title="getImgName(item.image_path)">
-                  {{ getImgName(item.image_path) }}
-                </h3>
-                <p class="info-item">
-                  <span>机器识别:</span>
-                  <span
-                    :class="{
-                  'text-primary font-semibold': item.result_type == enums.ocrResultTypeEnum.RIGHT.value,
-                  'line-through text-red-300': item.result_type == enums.ocrResultTypeEnum.WRONG.value
-                }"
-                    :title="getResultText(item)"
-                  >
-                    {{ getResultText(item) || "-" }}
-                  </span>
-                </p>
-                <p
-                  v-if="item.result_type == enums.ocrResultTypeEnum.WRONG.value"
-                  class="info-item"
-                >
-                  <span>人工矫正:</span>
-                  <span
-                    class="text-primary font-semibold"
-                    :title="getResultCorrectedText(item)"
-                  >
-                    {{ getResultCorrectedText(item) || "（空）" }}
-                  </span>
-                </p>
-                <p class="info-item">
-                  最大置信度: {{ item.max_confidence || "-" }}
-                </p>
-                <p class="info-item">
-                  分辨率: {{ item.pic_resolution || "-" }}
-                </p>
-
-                <el-radio-group
-                  v-if="false"
-                  :model-value="item.result_type"
-                  size="small"
-                  class="result-type-radios"
-                  disabled
-                >
-                  <el-radio-button
-                    v-for="t in resultTypes"
-                    :key="t.value"
-                    :label="t.value"
-                    :style="{'--radio-bg-color': t.color, '--radio-text-color': '#303133'}"
-                  >
-                    {{ t.label }}
-                  </el-radio-button>
-                </el-radio-group>
-
-                <div v-if="item.is_verified && false" class="is_verified">
-                  <!-- SVG Verified Icon Placeholder -->
-                  <svg
-                    viewBox="0 0 1024 1024"
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="100%"
-                    height="100%"
-                  >
-                    <path
-                      fill="#67C23A"
-                      d="M512 64a448 448 0 1 1 0 896 448 448 0 0 1 0-896zm-55.808 536.384-99.52-99.584a38.4 38.4 0 1 0-54.336 54.336l126.72 126.72a38.272 38.272 0 0 0 54.336 0l262.4-262.464a38.4 38.4 0 1 0-54.272-54.336L456.192 600.384z"
-                    ></path>
-                  </svg>
-                </div>
-              </div>
-            </div>
-          </el-card>
-        </div>
-      </div>
-
-      <!-- 分页 -->
-      <div class="pagination-wrapper">
-        <el-pagination
-          v-model:current-page="pagination.currentPage"
-          v-model:page-size="pagination.pageSize"
-          :total="pagination.total"
-          :page-sizes="[30, 60, 120, 240, 480]"
-          layout="total, sizes, prev, pager, next, jumper"
-          @size-change="handleSizeChange"
-          @current-change="handlePageChange"
-          background
-        />
-      </div>
-      <el-empty
-        v-if="paginatedResults.length === 0"
-        description="暂无数据"
-      ></el-empty>
-      {% endverbatim %}
-    </div>
+            <el-empty v-if="paginatedResults.length === 0" description="暂无数据"></el-empty>
+        </el-main>
+      </el-container>
+    </script>
+    {% endverbatim %}
 
     <script>
-      const { createApp, ref, computed, reactive, watch } = Vue;
-      const { Search, RefreshLeft, ArrowDown, ArrowUp, Filter } = ElementPlusIconsVue;
+      const { createApp, ref, computed, reactive, watch, onMounted } = Vue;
+      const { Search, RefreshLeft, FolderOpened, Setting } = ElementPlusIconsVue;
 
       const App = {
+        template: '#app-template',
         setup() {
-          const task = {{ task_json|safe }};
-          const allResults = {{ results_json|safe }};
-          const enums = {{ enums_json|safe }};
+          // --- 数据加载工具 ---
+          const loadServerData = (elementId, mockData) => {
+            const el = document.getElementById(elementId);
+            if (!el) return mockData;
+            
+            const rawContent = el.textContent.trim();
+            // 如果内容为空，或者包含未渲染的 Django 模板标签 {{ ... }}，则使用 Mock 数据
+            if (!rawContent || rawContent.startsWith('{{')) {
+              console.warn(`[DevMode] Using mock data for ${elementId}`);
+              return mockData;
+            }
+            
+            try {
+              return JSON.parse(rawContent);
+            } catch (e) {
+              console.error(`Failed to parse JSON for ${elementId}`, e);
+              return mockData;
+            }
+          };
 
-          const filterData = reactive({
-            has_match: null,
-            result_type: '',
-            keyword: '',
-            is_verified: null,
-            is_translated: null
+          // --- Mock Data 定义 (用于本地调试) ---
+          const MOCK_ENUMS = {
+            ocrResultTypeEnum: {
+              SUCCESS: { value: 1, label: "成功" },
+              ERROR: { value: 2, label: "失败" },
+              IGNORE: { value: 0, label: "忽略" }
+            }
+          };
+          
+          const MOCK_RESULTS = Array.from({ length: 5 }).map((_, i) => ({
+            id: i + 1,
+            image_path: `mock/path/image_${i + 1}.png`,
+            image_url: "https://via.placeholder.com/400x200?text=Mock+Image",
+            result_type: 1,
+            texts: [`Mock OCR Text Line ${i + 1}`],
+            pic_resolution: "1920x1080"
+          }));
+
+          // --- 初始化数据 ---
+          const task = loadServerData('dj-data-task', { id: 'LOCAL-DEBUG-TASK' });
+          const allResults = loadServerData('dj-data-results', MOCK_RESULTS);
+          const exportFilterData = loadServerData('dj-data-filter', {});
+          const enums = loadServerData('dj-data-enums', MOCK_ENUMS);
+          
+          // Local Data State
+          const localData = reactive({});
+          
+          // Initialize local data
+          // 优先使用注入的数据，否则初始化为空
+          const injectedData = window.__LOCAL_DATA__;
+          
+          // Local Config
+          const LOCAL_ROOT_KEY = "wfgame_local_root_path";
+          const injectedConfig = window.__LOCAL_CONFIG__;
+          const localRootPath = ref(injectedConfig?.localRootPath || localStorage.getItem(LOCAL_ROOT_KEY) || "");
+          
+          allResults.forEach(item => {
+              if (injectedData && injectedData[item.id]) {
+                  localData[item.id] = injectedData[item.id];
+              } else {
+                  localData[item.id] = {
+                      noTranslation: false,
+                      translation: ''
+                  };
+              }
           });
 
-          const confidenceRange = ref([0, 1]);
-          const isExpanded = ref(false);
+          const saveToFile = () => {
+              try {
+                  // 1. 获取当前 HTML 内容
+                  let htmlContent = document.documentElement.outerHTML;
+
+                  // 2. 准备要注入的数据
+                  const dataScript = `window.__LOCAL_DATA__ = ${JSON.stringify(localData)};`;
+                  const configScript = `window.__LOCAL_CONFIG__ = ${JSON.stringify({ localRootPath: localRootPath.value })};`;
+                  
+                  // 3. 替换注入点
+                  // 使用正则替换 script 标签内容
+                  const regexData = /<script id="data-injection">[\s\S]*?<\/script>/;
+                  const replacementData = `<script id="data-injection">${dataScript}<\/script>`;
+                  htmlContent = htmlContent.replace(regexData, replacementData);
+
+                  const regexConfig = /<script id="config-injection">[\s\S]*?<\/script>/;
+                  const replacementConfig = `<script id="config-injection">${configScript}<\/script>`;
+                  htmlContent = htmlContent.replace(regexConfig, replacementConfig);
+                  
+                  // 4. 创建 Blob 并下载
+                  const blob = new Blob([htmlContent], { type: 'text/html' });
+                  const url = URL.createObjectURL(blob);
+                  const link = document.createElement('a');
+                  link.href = url;
+                  link.download = `ocr_report_${task.id}_saved_${new Date().getTime()}.html`;
+                  document.body.appendChild(link);
+                  link.click();
+                  document.body.removeChild(link);
+                  URL.revokeObjectURL(url);
+                  
+                  ElementPlus.ElMessageBox.alert(
+                    '数据已成功保存到新文件中。请注意：后续如需继续变更，请打开新下载的文件进行操作，当前文件的修改无法直接保存到本地。',
+                    '保存成功',
+                    {
+                      confirmButtonText: '我知道了',
+                      type: 'success',
+                    }
+                  );
+              } catch (e) {
+                  console.error("Failed to save file", e);
+                  ElementPlus.ElMessage.error('保存文件失败');
+              }
+          };
+
+          const showFilterInfo = ref(false);
+          
+          const filterData = reactive({
+            keyword: '',
+            noTranslation: null,
+            hasTranslation: null
+          });
 
           const pagination = reactive({
             currentPage: 1,
-            pageSize: 30,
+            pageSize: 50,
             total: allResults.length
           });
 
           const filteredResults = ref([...allResults]);
 
-          const resultTypes = computed(() => {
-            return Object.values(enums.ocrResultTypeEnum).filter(item => item.value > 0);
-          });
+          const counts = computed(() => {
+            let needTrans = 0;
+            let noNeedTrans = 0;
+            let hasTrans = 0;
+            let noHasTrans = 0;
 
-          const hasActiveFilters = computed(() => {
-            return !!filterData.result_type || filterData.is_verified !== null || filterData.has_match !== null || filterData.is_translated !== null;
+            allResults.forEach(item => {
+                const itemData = localData[item.id];
+                if (itemData.noTranslation) {
+                    noNeedTrans++;
+                } else {
+                    needTrans++;
+                }
+
+                if (itemData.translation && itemData.translation.trim()) {
+                    hasTrans++;
+                } else {
+                    noHasTrans++;
+                }
+            });
+
+            return {
+                total: allResults.length,
+                needTrans,
+                noNeedTrans,
+                hasTrans,
+                noHasTrans
+            };
           });
 
           const handleSearch = () => {
             pagination.currentPage = 1;
             const results = allResults.filter(item => {
-              // 匹配状态
-              if (filterData.has_match !== null) {
-                 if (item.has_match !== filterData.has_match) return false;
-              }
-
-              // 翻译状态
-              if (filterData.is_translated !== null) {
-                 if (!!item.is_translated !== filterData.is_translated) return false;
-              }
-
-              // 审核状态
-              if (filterData.is_verified !== null) {
-                 if (item.is_verified !== filterData.is_verified) return false;
-              }
-
-              // 结果标记
-              if (filterData.result_type !== '') {
-                 if (item.result_type != filterData.result_type) return false;
-              }
-
-              // 关键字
+              const itemData = localData[item.id];
+              
+              // Keyword - 只搜索文件名
               if (filterData.keyword) {
-                  const text = getResultText(item).toLowerCase();
                   const name = getImgName(item.image_path).toLowerCase();
                   const kw = filterData.keyword.toLowerCase();
-                  if (!text.includes(kw) && !name.includes(kw)) return false;
+                  if (!name.includes(kw)) return false;
               }
 
-              // 置信度
-              const conf = item.max_confidence || 0;
-              if (conf < confidenceRange.value[0] || conf > confidenceRange.value[1]) return false;
+              // No Translation
+              if (filterData.noTranslation !== null) {
+                  if (itemData.noTranslation !== filterData.noTranslation) return false;
+              }
+
+              // Has Translation
+              if (filterData.hasTranslation !== null) {
+                  const hasTrans = !!(itemData.translation && itemData.translation.trim());
+                  if (hasTrans !== filterData.hasTranslation) return false;
+              }
 
               return true;
             });
@@ -574,12 +604,9 @@
           };
 
           const handleReset = () => {
-            filterData.has_match = null;
-            filterData.result_type = "";
             filterData.keyword = "";
-            filterData.is_verified = null;
-            filterData.is_translated = null;
-            confidenceRange.value = [0, 1];
+            filterData.noTranslation = null;
+            filterData.hasTranslation = null;
             handleSearch();
           };
 
@@ -596,74 +623,196 @@
 
           const handlePageChange = (page) => {
             pagination.currentPage = page;
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-          };
-
-          const toggleExpand = () => {
-            isExpanded.value = !isExpanded.value;
+            document.querySelector('.content-container').scrollTop = 0;
           };
 
           // Helpers
           const getImgName = (path) => path ? path.split('/').pop() : '未知图片';
 
           const getResultText = (item) => {
-               if (!item.texts) return "";
+               let texts = "";
+               if (item.result_type === 1) {
+                // 正确结果取：texts
+                texts = item.texts;
+               } else if (item.result_type === 2) {
+                // 错误结果取：correct_texts
+                texts = item.correct_texts;
+               } else {
+                // 其他结果取 texts 优先
+                texts = ""
+               }
+               if (!texts) return "";
                if (Array.isArray(item.texts)) return item.texts.join('');
-               return item.texts;
+               return texts;
           };
-
-          const getResultCorrectedText = (item) => {
-               if (!item.corrected_texts) return "";
-               if (Array.isArray(item.corrected_texts)) return item.corrected_texts.join('');
-               return item.corrected_texts;
-          };
-
-          const showTransImage = (item) => {
-              // 这里简单判断，如果需要显示翻译，且有翻译图
-              // 离线报告默认显示翻译如果存在
-              return item.is_translated && item.trans_image_url;
-          };
-
-          const getPreviewList = (item) => {
-              const list = [item.image_url];
-              if (showTransImage(item)) {
-                  list.push(item.trans_image_url);
-              }
-              return list;
-          };
-
-          const sortedEnum = (enumObj) => {
-              return Object.values(enumObj).sort((a, b) => (a.order || 0) - (b.order || 0));
+          
+          const isNoTranslation = (id) => {
+              return localData[id]?.noTranslation;
           };
 
           const formatTime = (timeStr) => {
               if (!timeStr) return '-';
               return new Date(timeStr).toLocaleString();
           };
+          
+          const formatFilterValue = (val, prefix) => {
+              if (val === null || val === undefined) return '全部';
+              if (val === true) return `已${prefix}`;
+              if (val === false) return `未${prefix}`;
+              return val;
+          };
+          
+          const getResultTypeLabel = (val) => {
+              if (!val) return '全部';
+              const typeEnum = enums.ocrResultTypeEnum;
+              for (const key in typeEnum) {
+                  if (typeEnum[key].value == val) return typeEnum[key].label;
+              }
+              return val;
+          };
+
+          // Local Path Logic
+          const handleSetLocalRoot = async () => {
+            try {
+              const { value } = await ElementPlus.ElMessageBox.prompt(
+                `
+                <div style="text-align: left; line-height: 1.6;">
+                    <p style="margin-bottom: 10px; color: #E6A23C; font-size: 13px;">
+                        ⚠️ 由于浏览器安全限制，网页无法自动获取文件夹的<b>绝对路径</b>（即盘符信息），因此无法使用"选择目录"功能。
+                    </p>
+                    <p style="margin-bottom: 5px; font-weight: bold;">请手动完成一次性配置：</p>
+                    <ol style="margin: 0 0 10px 20px; color: #606266; font-size: 13px;">
+                        <li>在资源管理器中打开您的项目根目录</li>
+                        <li>点击顶部<b>地址栏</b>（或按 Alt+D），复制完整路径</li>
+                        <li>粘贴到下方输入框中</li>
+                    </ol>
+                </div>
+                `,
+                "设置本地路径映射",
+                {
+                  confirmButtonText: "保存",
+                  cancelButtonText: "取消",
+                  inputValue: localRootPath.value,
+                  inputPlaceholder: "粘贴路径，例如: E:\\projects\\WFGameAI",
+                  dangerouslyUseHTMLString: true,
+                  inputPattern: /.+/,
+                  inputErrorMessage: '路径不能为空',
+                  closeOnClickModal: false
+                }
+              );
+
+              if (value) {
+                let cleanPath = value.trim();
+                cleanPath = cleanPath.replace(/\//g, "\\");
+                if (cleanPath.endsWith("\\")) {
+                  cleanPath = cleanPath.slice(0, -1);
+                }
+                
+                localRootPath.value = cleanPath;
+                try {
+                    localStorage.setItem(LOCAL_ROOT_KEY, cleanPath);
+                } catch (e) {}
+                ElementPlus.ElMessage.success("本地路径已保存");
+              }
+            } catch (e) {
+            }
+          };
+
+          const copyText = (text) => {
+              const fallbackCopy = (text) => {
+                  const textArea = document.createElement("textarea");
+                  textArea.value = text;
+                  textArea.style.position = "fixed";
+                  textArea.style.left = "-9999px";
+                  document.body.appendChild(textArea);
+                  textArea.focus();
+                  textArea.select();
+                  try {
+                      document.execCommand('copy');
+                      ElementPlus.ElMessage.success({
+                        message: "命令已复制！请按 Win+R，粘贴并回车",
+                        duration: 4000,
+                        showClose: true
+                      });
+                  } catch (err) {
+                      ElementPlus.ElMessage.error('复制失败，请手动复制');
+                  }
+                  document.body.removeChild(textArea);
+              }
+
+              if (navigator.clipboard && window.isSecureContext) {
+                  navigator.clipboard.writeText(text).then(() => {
+                      ElementPlus.ElMessage.success({
+                        message: "命令已复制！请按 Win+R，粘贴并回车",
+                        duration: 4000,
+                        showClose: true
+                      });
+                  }).catch(() => {
+                      fallbackCopy(text);
+                  });
+              } else {
+                  fallbackCopy(text);
+              }
+          };
+
+          const handleCopyLocalCommand = (imagePath) => {
+            if (!localRootPath.value) {
+              ElementPlus.ElMessage.warning("请先点击右侧齿轮设置本地根目录");
+              handleSetLocalRoot();
+              return;
+            }
+            // 数据库记录的原始路径示例
+            // ocr/repositories/CardGame2/Client/assets/_ResStatic/SpriteFrame/ye1.png
+            // 移除前3级目录，得到图片相对仓库 Root 的相对路径：Client/assets/_ResStatic/SpriteFrame/ye1.png
+            let normRel = imagePath;
+            const parts = normRel.split('/');
+            if (parts.length > 3) {
+                normRel = parts.slice(3).join('/');
+            }
+            normRel = normRel.replace(/\//g, "\\");
+            if (normRel.startsWith("\\")) normRel = normRel.slice(1);
+
+            const fullPath = `${localRootPath.value}\\${normRel}`;
+            const command = `explorer /select, "${fullPath}"`;
+
+            copyText(command);
+          };
+
+          onMounted(() => {
+              ElementPlus.ElNotification({
+                  title: '重要提示：数据保存说明',
+                  message: '由于浏览器安全限制，您在此页面所做的修改（如标记是否翻译、填写翻译文本等）无法直接保存到当前文件。请务必在操作完成后，点击右上角的【保存更改到文件】按钮下载新文件，否则关闭页面后数据将丢失。',
+                  type: 'warning',
+                  duration: 0,
+                  position: 'top-right',
+                  offset: 50
+              });
+          });
 
           return {
             task,
-            enums,
+            exportFilterData,
+            localData,
             filterData,
-            confidenceRange,
-            isExpanded,
             pagination,
             paginatedResults,
-            resultTypes,
-            hasActiveFilters,
-            Search, RefreshLeft, ArrowDown, ArrowUp, Filter,
+            showFilterInfo,
+            counts,
+            Search, RefreshLeft,
             handleSearch,
             handleReset,
             handleSizeChange,
             handlePageChange,
-            toggleExpand,
+            saveToFile,
             getImgName,
             getResultText,
-            getResultCorrectedText,
-            showTransImage,
-            getPreviewList,
-            sortedEnum,
-            formatTime
+            isNoTranslation,
+            formatTime,
+            formatFilterValue,
+            getResultTypeLabel,
+            handleSetLocalRoot,
+            handleCopyLocalCommand,
+            FolderOpened, Setting
           };
         }
       };

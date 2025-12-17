@@ -29,7 +29,8 @@ export enum SSEEvent {
   // ============= 更多自定义业务事件 =============
   OCR_TASK_UPDATE = "ocr_task_update", // OCR 任务更新
   ACTION_UPDATE = "action_update", // 动作库更新
-  DEVICE_UPDATE = "device_update" // 设备信息更新
+  DEVICE_UPDATE = "device_update", // 设备信息更新
+  OCR_REPORT_EXPORT = "ocr_report_export" // OCR离线报告导出
 }
 
 // --- 模块级变量，确保全局只有一个 EventSource 实例和监听器集合 ---

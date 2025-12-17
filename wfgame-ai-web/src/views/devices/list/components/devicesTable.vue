@@ -356,7 +356,7 @@ const isEditingName = (device: DeviceItem) => {
         label="占用人员"
         sortable
         @click="sortBy('current_user_name')"
-        width="120"
+        width="140"
       >
         <template #default="{ row }">
           <el-tag v-if="row.current_user" type="warning" effect="dark">

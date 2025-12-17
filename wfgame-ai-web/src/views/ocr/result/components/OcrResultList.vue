@@ -6,7 +6,7 @@
         <!-- 左侧：高频筛选（匹配状态、翻译状态） -->
         <div class="filter-groups-left">
           <div class="filter-group-item">
-            <span class="label-text">匹配状态：</span>
+            <span class="label-text">文本匹配：</span>
             <el-radio-group
               v-model="filterData.has_match"
               @change="fetchResults"
@@ -83,7 +83,7 @@
 
           <el-tooltip content="导出离线报告" placement="top">
             <el-button
-              v-if="false"
+              v-if="true"
               :icon="Download"
               circle
               @click="handleExportOfflineReport"
@@ -260,7 +260,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, computed, nextTick } from "vue";
+import { ref, reactive, watch, computed, nextTick, h, onUnmounted } from "vue";
 import {
   type OcrResult,
   ocrTaskApi,
@@ -274,7 +274,8 @@ import {
   Filter,
   Download
 } from "@element-plus/icons-vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElNotification, ElProgress } from "element-plus";
+import { useSSE, SSEEvent } from "@/layout/components/sseState/useSSE";
 import { superRequest } from "@/utils/request";
 import OcrResultCard from "./OcrResultCard.vue";
 import {
@@ -284,7 +285,7 @@ import {
   ocrIsTranslatedEnum,
   sortedEnum
 } from "@/utils/enums";
-import { mediaUrl } from "@/api/utils";
+import { mediaUrl, ocrImageUrl } from "@/api/utils";
 import { ocrResultApi } from "@/api/ocr";
 import OcrCorrectionDialog from "./OcrCorrectionDialog.vue";
 import { message } from "@/utils/message";
@@ -296,6 +297,51 @@ const props = defineProps<{
 
 const loading = ref(false);
 const exportLoading = ref(false);
+const { on } = useSSE();
+const exportProgress = ref(0);
+let notificationHandle: any = null;
+
+on(SSEEvent.OCR_REPORT_EXPORT, async (data: any) => {
+  if (data && data.url && data.task_id === props.taskId) {
+    exportProgress.value = 100;
+    if (notificationHandle) {
+      notificationHandle.close();
+      notificationHandle = null;
+    }
+
+    // ElNotification({
+    //   title: "离线报告生成成功",
+    //   message: "正在开始下载...",
+    //   type: "success",
+    //   duration: 3000
+    // });
+
+    const url = mediaUrl(data.url);
+    try {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute("download", url.split("/").pop() || "report.html");
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    } catch (e) {
+      console.error(e);
+      window.open(url, "_blank");
+    } finally {
+      exportLoading.value = false;
+    }
+  }
+});
+
+onUnmounted(() => {
+  if (notificationHandle) {
+    notificationHandle.close();
+  }
+});
+
 const results = ref<OcrResult[]>([]);
 const isScrollBottom = ref(false);
 const filterData = reactive<Partial<TaskGetDetailsParams>>({
@@ -329,7 +375,9 @@ const viewerIndex = ref(0);
 const viewerSrcList = computed(() => {
   const list: string[] = [];
   results.value.forEach(item => {
-    list.push(mediaUrl(item.image_path));
+    // 原图
+    list.push(ocrImageUrl(item.image_hash));
+    // 翻译图
     if (props.showTranslation && item.is_translated && item.trans_image_path) {
       list.push(mediaUrl(item.trans_image_path));
     }
@@ -540,38 +588,53 @@ const handleBatchVerifyPage = async () => {
 const handleExportOfflineReport = async () => {
   if (!props.taskId) return;
   exportLoading.value = true;
+  exportProgress.value = 0;
   try {
     const res = await superRequest({
       apiFunc: ocrTaskApi.exportOfflineHtml,
-      apiParams: props.taskId
+      apiParams: { task_id: props.taskId, filter_data: filterData }
     });
 
-    if (res && res.data && res.data.url) {
-      const url = mediaUrl(res.data.url);
-      ElMessage.success("离线报告生成任务已提交，请稍后下载");
+    if (res) {
+      ElMessage.success("离线报告生成任务已提交");
 
-      // 简单的延迟下载尝试，或者提示用户
-      setTimeout(async () => {
-        try {
-          const response = await fetch(url);
-          const blob = await response.blob();
-          const link = document.createElement("a");
-          link.href = URL.createObjectURL(blob);
-          link.setAttribute("download", url.split("/").pop() || "report.html");
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          URL.revokeObjectURL(link.href);
-        } catch (e) {
-          console.error(e);
-          window.open(url, "_blank");
+      notificationHandle = ElNotification({
+        title: "正在生成离线报告...",
+        message: () =>
+          h("div", [
+            h(
+              "p",
+              { style: "margin-bottom: 8px" },
+              "正在后台生成报告，请稍候..."
+            ),
+            h(ElProgress, {
+              percentage: exportProgress.value,
+              status: exportProgress.value === 100 ? "success" : "",
+              "text-inside": true,
+              "stroke-width": 18
+            })
+          ]),
+        duration: 0,
+        showClose: true,
+        onClose: () => {
+          exportLoading.value = false;
         }
-      }, 2000);
+      });
+
+      // 模拟进度条
+      const interval = setInterval(() => {
+        if (exportProgress.value < 95 && exportLoading.value) {
+          exportProgress.value += Math.floor(Math.random() * 5) + 1;
+        } else {
+          clearInterval(interval);
+        }
+      }, 500);
+    } else {
+      exportLoading.value = false;
     }
   } catch (error) {
     console.error(error);
     ElMessage.error("导出请求失败");
-  } finally {
     exportLoading.value = false;
   }
 };
