@@ -34,16 +34,35 @@ AI_CELERY.conf.update(
         'retry_on_timeout': True,             # 超时重试
     },
     result_backend=redis_url,
+    # 自定义日志格式：简化输出，删除进程信息
+    worker_log_format='[%(asctime)s: %(levelname)s] %(message)s',
+    worker_task_log_format='[%(asctime)s: %(levelname)s] %(message)s',
 )
 
 # 使用字符串表示，以避免将对象本身通过pickle序列化
 AI_CELERY.config_from_object('django.conf:settings', namespace='CELERY')
 
 def _has_alive_worker(app: Celery, timeout: float = 2.0) -> bool:
+    """检测是否有可用的Celery Worker"""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
+        logger.info(f"🔍 检测Celery Worker状态（超时: {timeout}秒）...")
         replies = app.control.ping(timeout=timeout)
-        return bool(replies)
-    except Exception:
+        
+        if replies:
+            worker_names = [list(r.keys())[0] if r else 'unknown' for r in replies]
+            logger.info(f"✅ 检测到 {len(replies)} 个Worker: {', '.join(worker_names)}")
+            return True
+        else:
+            logger.warning("⚠️ 未检测到任何可用的Celery Worker")
+            logger.warning("💡 请确认Worker已启动，可运行: python start_celery_worker.py")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Worker状态检测异常: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
         return False
 
 

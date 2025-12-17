@@ -38,6 +38,17 @@ const formatDuration = (ms: number): string => {
   return `${s.toFixed(2)}s`;
 };
 
+// 判断步骤是否为 defaults 定义（需要过滤掉）
+const isDefaultsStep = (step: any): boolean => {
+  if (!step || typeof step !== 'object') return false;
+  // 检查三种 defaults 标记方式
+  return (
+    step.step_type === 'defaults' ||
+    step.is_defaults === true ||
+    step.action === 'set_defaults'
+  );
+};
+
 const props = defineProps<{ taskId: string; scriptIds?: number[] }>();
 
 type Step = {
@@ -166,8 +177,9 @@ onMounted(async () => {
           if (grp && Array.isArray(s.steps)) {
             // 更新脚本名
             if (s.name) grp.scriptName = s.name;
-            // 预填步骤
-            s.steps.forEach((stepDef: any, idx: number) => {
+            // 预填步骤（过滤掉 defaults 定义）
+            const actualSteps = s.steps.filter((step: any) => !isDefaultsStep(step));
+            actualSteps.forEach((stepDef: any, idx: number) => {
               if (grp.steps.length <= idx) {
                 grp.steps.push({
                   status: "等待",
@@ -354,7 +366,15 @@ onMounted(async () => {
                     grp.scriptName = meta.name;
                   }
                 }
-                const stepsArr = Array.isArray(rec?.steps) ? rec.steps : [];
+                // 过滤掉 defaults 步骤（快照数据中可能包含 defaults）
+                const rawSteps = Array.isArray(rec?.steps) ? rec.steps : [];
+                const stepsArr = rawSteps.filter((step: any) => !isDefaultsStep(step));
+                
+                // 如果快照步骤数少于当前步骤数，删除多余的步骤（避免预填时包含了 defaults）
+                if (stepsArr.length < grp.steps.length) {
+                  grp.steps.length = stepsArr.length;
+                }
+                
                 for (let i = 0; i < stepsArr.length; i++) {
                   const s = stepsArr[i] || {};
                   let r: any = {};

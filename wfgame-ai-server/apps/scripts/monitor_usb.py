@@ -7,7 +7,9 @@ import threading
 
 # --- 1. 手动设置 Django 环境 ---
 # 将项目根目录添加到 sys.path
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+# 当前文件: wfgame-ai-server/apps/scripts/monitor_usb.py
+# 项目根目录: wfgame-ai-server (需要向上两级)
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 

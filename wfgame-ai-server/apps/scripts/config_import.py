@@ -7,9 +7,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 # Add to path and import
 sys.path.insert(0, project_root)
 
-# Import ConfigManager
+# 导入配置管理器
 try:
-    from utils import ConfigManager
+    from utils.config_helper import ConfigManager
     # Create a singleton instance
     config_manager = ConfigManager()
     print("Successfully imported ConfigManager")

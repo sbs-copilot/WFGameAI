@@ -4,7 +4,7 @@
 
 用法示例：
     # 开发环境（使用 config_dev.ini，对应队列 ai_queue，可选自动重载）
-    python start_celery_worker.py --env dev
+    python start_celery_worker.py --env dev --autoreload
     
     # 线上环境（使用 config.ini，对应队列 ai_queue_prod，默认禁用自动重载）
     python start_celery_worker.py --env prod
@@ -25,13 +25,28 @@ from typing import Dict, List
 
 
 def build_command(python_exec: str, queue: str, name: str,
-                  loglevel: str) -> List[str]:
-    """构建 Celery 启动命令参数列表。"""
+                  loglevel: str, concurrency: int = 28) -> List[str]:
+    """
+    构建 Celery 启动命令参数列表
+    
+    Args:
+        python_exec: Python解释器路径
+        queue: 队列名称
+        name: Worker名称
+        loglevel: 日志级别
+        concurrency: 并发数（仅在gevent池下生效）
+    
+    Returns:
+        命令参数列表
+    """
+    # Windows平台使用gevent池实现真正的并发
+    # solo池不支持并发，会导致所有任务串行执行
     return [
         python_exec, '-m', 'celery',
         '-A', 'wfgame_ai_server_main',
         'worker',
-        '--pool=solo',
+        '--pool=gevent',  # 修改为gevent池，支持真正的并发
+        '--concurrency', str(concurrency),  # 设置并发数
         '-l', str(loglevel),
         '-n', str(name),
         '-Q', str(queue),
@@ -115,14 +130,35 @@ def stop_existing_worker(pid_file: str) -> None:
         print(f'读取PID文件失败: {e}')
 
 
+def check_gevent_installed() -> bool:
+    """检查gevent是否已安装"""
+    try:
+        import gevent
+        return True
+    except ImportError:
+        return False
+
+
 def main() -> int:
     """入口函数：启动 Celery Worker，支持环境隔离与可选自动重载。"""
+    # 检查gevent依赖
+    if not check_gevent_installed():
+        print('=' * 60)
+        print('错误: 未安装gevent库')
+        print('=' * 60)
+        print('gevent是实现Celery并发执行的必需依赖。')
+        print('请运行以下命令安装:')
+        print('  pip install gevent')
+        print('=' * 60)
+        return 1
+    
     parser = argparse.ArgumentParser(description='启动 Celery Worker')
     parser.add_argument('--env', type=str, default=os.environ.get('AI_ENV', 'dev'),
                         help='环境标识(dev/prod/test等)，用于隔离队列、worker、pid与日志')
     parser.add_argument('--queue', type=str, default='ai_queue', help='基础队列名（会追加环境后缀）')
     parser.add_argument('--name', type=str, default='ai_worker', help='基础Worker名（会追加环境后缀）')
     parser.add_argument('--loglevel', type=str, default='info', help='日志等级')
+    parser.add_argument('--concurrency', type=int, default=28, help='并发数（gevent池）')
     parser.add_argument('--interval', type=float, default=1.5, help='检测间隔(秒)')
     parser.add_argument('--autoreload', action='store_true', help='启用源码自动重载(仅开发环境建议)')
     args = parser.parse_args()
@@ -144,7 +180,7 @@ def main() -> int:
         return 1
 
     python_exec = sys.executable
-    base_cmd = build_command(python_exec, queue_name, worker_name, args.loglevel)
+    base_cmd = build_command(python_exec, queue_name, worker_name, args.loglevel, args.concurrency)
 
     # 环境变量：确保实时输出与更友好的日志
     env = dict(os.environ)

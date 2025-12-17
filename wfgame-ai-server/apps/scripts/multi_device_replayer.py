@@ -5,8 +5,10 @@
 🔧 已修复：集成统一报告管理系统，解决设备报告目录创建问题
 """
 
+import json
 import os
 import sys
+import tempfile
 import time
 from datetime import datetime
 from multiprocessing import Process, Manager
@@ -44,8 +46,12 @@ def device_worker(device_serial, scripts, shared_results, task_id=None):
             if current_dir not in sys.path:
                 sys.path.insert(0, current_dir)
 
-            # 导入报告管理系统
+            # 添加项目根目录到 Python 路径（关键：解决 utils 包导入问题）
             project_root = os.path.dirname(os.path.dirname(current_dir))
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            
+            # 导入报告管理系统
             reports_path = os.path.join(project_root, 'apps', 'reports')
             if reports_path not in sys.path:
                 sys.path.insert(0, reports_path)
@@ -79,9 +85,9 @@ def device_worker(device_serial, scripts, shared_results, task_id=None):
         print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 开始处理")
 
         # 基于 task_id 的运行目录 ${server}/apps/reports/tmp/replay/task_<id>/<serial>_<ts>
+        server_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
         device_report_dir = None
         try:
-            server_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
             from datetime import datetime as _dt
             _run_ts = _dt.now().strftime('%Y%m%d_%H%M%S')
             base_root = os.path.join(server_dir, 'apps', 'reports', 'tmp', 'replay', f"task_{int(task_id) if task_id is not None else 'session'}")
@@ -94,12 +100,37 @@ def device_worker(device_serial, scripts, shared_results, task_id=None):
             timestamp = datetime.now().strftime("%H:%M:%S")
             print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 运行目录初始化失败: {e}")
 
-        # 获取设备连接
+        # 使用设备连接池获取设备（避免重复初始化）
         device = None
-        for dev in adb.device_list():
-            if dev.serial == device_serial:
-                device = dev
-                break
+        try:
+            from device_connection_pool import get_device_connection_pool
+            
+            pool = get_device_connection_pool()
+            device_info = pool.get_device(device_serial)
+            
+            if device_info and device_info.init_success:
+                device = device_info.device
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 从连接池获取成功")
+            else:
+                # 降级：使用传统方式连接
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 连接池获取失败，尝试传统方式...")
+                
+                for dev in adb.device_list():
+                    if dev.serial == device_serial:
+                        device = dev
+                        break
+                        
+        except Exception as pool_err:
+            # 连接池异常，降级到传统方式
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 连接池异常: {pool_err}，使用传统方式")
+            
+            for dev in adb.device_list():
+                if dev.serial == device_serial:
+                    device = dev
+                    break
 
         if not device:
             timestamp = datetime.now().strftime("%H:%M:%S")
@@ -179,51 +210,112 @@ def device_worker(device_serial, scripts, shared_results, task_id=None):
         executed_scripts = []
         script_execution_success = True  # 新增：脚本执行状态标记
 
-        for script_config in scripts:
-            script_path = script_config.get('path')
-            loop_count = script_config.get('loop_count', 1)
-            max_duration = script_config.get('max_duration')
+        temp_script_files = []
+        try:
+            for script_config in scripts:
+                script_path = script_config.get('path')
+                script_id = script_config.get('script_id')
+                loop_count = script_config.get('loop_count', 1)
+                max_duration = script_config.get('max_duration')
+                temp_script_path = None
 
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 开始执行脚本: {os.path.basename(script_path)}")
+                if not script_path and script_id:
+                    try:
+                        from replay_script import load_script_content
 
-            try:
-                # 🔧 修改：传递设备报告目录到ActionProcessor
-                if device_report_dir and hasattr(action_processor, 'set_device_report_dir'):
-                    action_processor.set_device_report_dir(device_report_dir)                # 执行脚本 - 使用正确的方法名
-                result = action_processor.process_script(script_path)
+                        steps, meta, _disp_name = load_script_content(script_config)
+                        script_payload = {}
+                        if steps is not None:
+                            script_payload['steps'] = steps
+                        else:
+                            script_payload['steps'] = []
+                        if meta:
+                            script_payload['meta'] = meta
 
-                # 处理返回结果
-                if hasattr(result, 'success'):
-                    if result.success:
-                        success_count = 1
-                        failed_count = 0
-                    else:
-                        success_count = 0
-                        failed_count = 1
-                else:
-                    # 兼容其他返回格式
-                    success_count = 1 if result else 0
-                    failed_count = 0 if result else 1
+                        temp_dir = device_report_dir or os.path.join(server_dir, 'apps', 'reports', 'tmp', 'replay', 'temp_scripts')
+                        os.makedirs(temp_dir, exist_ok=True)
+                        temp_file = tempfile.NamedTemporaryFile(
+                            mode='w', encoding='utf-8', suffix='.json', prefix=f'script_{script_id}_',
+                            dir=temp_dir, delete=False
+                        )
+                        json.dump(script_payload, temp_file, ensure_ascii=False, indent=2)
+                        temp_file_path = temp_file.name
+                        temp_file.close()
+                        temp_script_files.append(temp_file_path)
+                        temp_script_path = temp_file_path
+                        script_path = temp_script_path
 
-                total_success += success_count
-                total_failed += failed_count
-                executed_scripts.append({
-                    'script': os.path.basename(script_path),
-                    'success': success_count,
-                    'failed': failed_count
-                })
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 已生成临时脚本文件: {os.path.basename(temp_script_path)}")
+                    except Exception as load_e:
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 脚本加载失败(script_id={script_id}): {load_e}")
+                        script_execution_success = False
+                        total_failed += 1
+                        shared_results[device_serial] = {
+                            'success': False,
+                            'error': f'脚本加载失败(script_id={script_id}): {load_e}',
+                            'device_report_dir': str(device_report_dir) if device_report_dir else None
+                        }
+                        continue
 
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 脚本执行完成 - 成功:{success_count}, 失败:{failed_count}")
-
-            except Exception as e:
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 脚本执行异常: {e}")
-                total_failed += 1
-                # 脚本执行异常时，标记为执行失败
-                if "读取脚本失败" in str(e) or "脚本文件不存在" in str(e):
+                if not script_path:
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 脚本配置缺少 path/script_id，已跳过: {script_config}")
+                    total_failed += 1
                     script_execution_success = False
+                    continue
+
+                script_basename = os.path.basename(script_path) if script_path else '未知脚本'
+
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 开始执行脚本: {script_basename}")
+
+                try:
+                    # 🔧 修改：传递设备报告目录到ActionProcessor
+                    if device_report_dir and hasattr(action_processor, 'set_device_report_dir'):
+                        action_processor.set_device_report_dir(device_report_dir)
+                    result = action_processor.process_script(script_path)
+
+                    # 处理返回结果
+                    if hasattr(result, 'success'):
+                        if result.success:
+                            success_count = 1
+                            failed_count = 0
+                        else:
+                            success_count = 0
+                            failed_count = 1
+                    else:
+                        # 兼容其他返回格式
+                        success_count = 1 if result else 0
+                        failed_count = 0 if result else 1
+
+                    total_success += success_count
+                    total_failed += failed_count
+                    executed_scripts.append({
+                        'script': script_basename,
+                        'success': success_count,
+                        'failed': failed_count
+                    })
+
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 脚本执行完成 - 成功:{success_count}, 失败:{failed_count}")
+
+                except Exception as e:
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[进程 {os.getpid()}][{timestamp}] 设备 {device_serial} 脚本执行异常: {e}")
+                    total_failed += 1
+                    # 脚本执行异常时，标记为执行失败
+                    if "读取脚本失败" in str(e) or "脚本文件不存在" in str(e):
+                        script_execution_success = False
+        finally:
+            for temp_path in temp_script_files:
+                try:
+                    if os.path.isfile(temp_path):
+                        os.remove(temp_path)
+                except Exception as cleanup_e:
+                    timestamp = datetime.now().strftime("%H:%M:%S")
+                    print(f"[进程 {os.getpid()}][{timestamp}] 清理临时脚本失败: {cleanup_e}")
 
         # 释放分配的账号
         if device_account:
@@ -343,28 +435,37 @@ def replay_scripts_on_devices(device_serials, scripts, max_workers=4, strategy="
         shared_results = manager.dict()
         processes = []
 
-        # 为每台设备创建独立进程
+        # 批量创建所有进程（不启动）
         for i, device_serial in enumerate(device_serials):
             p = Process(
                 target=device_worker,
                 args=(device_serial, scripts, shared_results, task_id)
             )
             p.daemon = True
-            processes.append(p)
+            processes.append((device_serial, p))
+        
+        # 真正的并行启动：所有进程几乎同时启动
+        start_timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{start_timestamp}] 🚀 开始并行启动 {len(processes)} 个设备进程...")
+        
+        for device_serial, p in processes:
             p.start()
-
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[{timestamp}] 已启动设备 {device_serial} 的回放进程，PID: {p.pid}")
-
-            # 错峰启动，避免瞬时ADB冲突
-            time.sleep(0.3)
+            # 极小的延迟（10ms）仅用于避免进程ID冲突，不影响并行性
+            time.sleep(0.01)
+        
+        # 输出所有进程的PID
+        for device_serial, p in processes:
+            print(f"  ✓ 设备 {device_serial} 进程已启动，PID: {p.pid}")
+        
+        end_timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{end_timestamp}] ✅ 所有设备进程启动完成")
 
         # 等待所有进程完成
         print(f"⏳ 等待 {len(processes)} 个进程完成...")
-        for i, p in enumerate(processes):
+        for i, (device_serial, p) in enumerate(processes):
             p.join()
             timestamp = datetime.now().strftime("%H:%M:%S")
-            print(f"[{timestamp}] 进程 {i+1}/{len(processes)} 已完成")
+            print(f"[{timestamp}] 设备 {device_serial} 进程已完成 ({i+1}/{len(processes)})")
 
         # 收集并返回结果
         results = dict(shared_results)

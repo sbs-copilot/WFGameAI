@@ -21,7 +21,12 @@ import textwrap
 # Add project root to path to import utils
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-from utils import get_project_root
+try:
+    from utils.config_helper import get_project_root
+except ImportError:
+    # 降级处理：如果导入失败，使用简单的路径计算
+    def get_project_root():
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -271,8 +276,16 @@ class EnhancedDevicePreparationManager:
             # 解决权限问题
             self._fix_device_permissions(device_id)
 
-            # 解决锁屏问题
-            self._handle_screen_lock(device_id)
+            # 解决锁屏问题 - 使用智能屏幕状态检测
+            try:
+                from screen_state_detector import ScreenStateDetector
+                detector = ScreenStateDetector(device_id)
+                if detector.ensure_screen_ready():
+                    logger.info(f"设备 {device_id} 智能屏幕检测成功")
+                else:
+                    logger.warning(f"设备 {device_id} 智能屏幕检测失败")
+            except Exception as e:
+                logger.error(f"设备 {device_id} 屏幕状态检测异常: {e}")
 
             # 解决输入法问题（默认用Yousite输入法）
             if not self._wake_up_yousite(device_id):
@@ -824,20 +837,6 @@ class EnhancedDevicePreparationManager:
         except Exception as e:
             logger.warning(f"修复设备 {device_id} 权限时出错: {e}")
 
-    def _handle_screen_lock(self, device_id: str):
-        """处理锁屏问题"""
-        try:
-            # 唤醒屏幕
-            subprocess.run(f"adb -s {device_id} shell input keyevent 26",
-                         shell=True, capture_output=True)
-            time.sleep(1)
-
-            # 滑动解锁（假设是简单滑动解锁）
-            subprocess.run(f"adb -s {device_id} shell input swipe 500 1000 500 500",
-                         shell=True, capture_output=True)
-
-        except Exception as e:
-            logger.warning(f"处理设备 {device_id} 锁屏时出错: {e}")
 
     def _auto_accept_usb_debugging(self, device_id: str) -> bool:
         """自动接受USB调试授权请求"""

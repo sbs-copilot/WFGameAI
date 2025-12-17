@@ -5,7 +5,7 @@ import { getTaskDetail } from "@/api/tasks";
 import CopyToClipboard from "@/components/Common/CopyToClipboard.vue";
 import { superRequest } from "@/utils/request";
 import { connectSocket } from "@/views/replay/utils/socket";
-import { InfoFilled } from "@element-plus/icons-vue";
+import { InfoFilled, CircleCheck, CircleClose } from "@element-plus/icons-vue";
 import { computed, defineProps, onMounted, onUnmounted, ref, watch } from "vue";
 
 const props = defineProps<{
@@ -21,6 +21,8 @@ const progressPct = ref<number>(0); // 进度百分比（0-100）
 // 固定总步骤：Σ(各脚本步骤数) * 活跃设备数；完成步骤：成功/失败步骤累计
 const totalSteps = ref<number>(0);
 const finishedSteps = ref<number>(0);
+const successSteps = ref<number>(0); // 成功步骤数
+const failedSteps = ref<number>(0); // 失败步骤数
 // 已完成步骤集合 device|script|stepIndex 用于去重
 const finishedKeySet = ref<Set<string>>(new Set());
 
@@ -320,6 +322,8 @@ onMounted(() => {
           : [];
         let total = 0;
         let completed = 0;
+        let success = 0;
+        let failed = 0;
         // 若启用脚本单元计算，则通过快照建立脚本步数与已完成集合
         const pssc: Record<number, number> = { ...perScriptStepCount.value }; // 基于已获取的脚本详情初始化
         for (const dev of devices) {
@@ -336,7 +340,13 @@ onMounted(() => {
             for (const s of steps) {
               // 兼容新旧结构：优先检查 result.status，其次检查 status
               const st = String(s?.result?.status || s?.status || "").toLowerCase();
-              if (st === "success" || st === "failed") completed += 1;
+              if (st === "success") {
+                completed += 1;
+                success += 1;
+              } else if (st === "failed") {
+                completed += 1;
+                failed += 1;
+              }
               // 步进式填充完成集合（快照）
               if (
                 stepCalcEnabled.value &&
@@ -383,7 +393,14 @@ onMounted(() => {
           finishedSteps.value = finishedKeySet.value.size;
           recomputePercentFromFinished();
         }
-        if (total > 0) snapPct = Math.round((completed / total) * 100);
+        // 更新统计数据
+        if (total > 0) {
+          totalSteps.value = total;
+          snapPct = Math.round((completed / total) * 100);
+        }
+        if (success > 0) successSteps.value = success;
+        if (failed > 0) failedSteps.value = failed;
+        if (completed > 0) finishedSteps.value = completed;
       }
 
       // 解析任务详情状态
@@ -439,31 +456,43 @@ onMounted(() => {
       onProgress: (data: any) => {
         gotProgress.value = true;
         trySetCeleryId(data);
-        // 当启用多设备步进计算时，忽略后端聚合百分比（仅在全部完成或没有步进数据时使用后端值）
-        if (!stepCalcEnabled.value) {
-          updateProgress(data);
-          if (typeof data?.percent === "number") {
-            if (data.percent >= 100) updateStatus("finished");
-            else updateStatus("running");
-          } else if (
-            typeof data?.current === "number" &&
-            typeof data?.total === "number" &&
-            data.total > 0
-          ) {
-            const pct = Math.round((data.current / data.total) * 100);
-            if (pct >= 100) updateStatus("finished");
-            else updateStatus("running");
-          }
-        } else {
-          // 若仍收到百分比100，只有在本地已统计全部完成时才提升状态
-          if (typeof data?.percent === "number" && data.percent >= 100) {
-            if (
-              finishedSteps.value >= totalSteps.value &&
-              totalSteps.value > 0
-            ) {
-              updateStatus("finished");
-            }
-          }
+        
+        // 兼容后端推送的多种字段格式
+        // 后端推送: { progress, completed_steps, total_steps, success_steps, failed_steps }
+        // 旧格式: { percent, current, total }
+        const progressValue = data?.progress ?? data?.percent;
+        const currentValue = data?.completed_steps ?? data?.current;
+        const totalValue = data?.total_steps ?? data?.total;
+        const successValue = data?.success_steps;
+        const failedValue = data?.failed_steps;
+        
+        // 同步更新 totalSteps（如果后端提供了）
+        if (typeof totalValue === "number" && totalValue > 0) {
+          totalSteps.value = totalValue;
+        }
+        
+        // 同步更新成功/失败统计
+        if (typeof successValue === "number") {
+          successSteps.value = successValue;
+        }
+        if (typeof failedValue === "number") {
+          failedSteps.value = failedValue;
+        }
+        
+        // 优先使用后端推送的进度百分比
+        if (typeof progressValue === "number") {
+          progressPct.value = progressValue;
+          if (progressValue >= 100) updateStatus("finished");
+          else updateStatus("running");
+        } else if (
+          typeof currentValue === "number" &&
+          typeof totalValue === "number" &&
+          totalValue > 0
+        ) {
+          const pct = Math.round((currentValue / totalValue) * 100);
+          progressPct.value = pct;
+          if (pct >= 100) updateStatus("finished");
+          else updateStatus("running");
         }
       },
       // 新增：监听 step 事件以便步进式计算
@@ -473,6 +502,8 @@ onMounted(() => {
           progressPct.value = data.progress;
           totalSteps.value = data.total_steps;
           if (typeof data?.completed_steps === "number") finishedSteps.value = data.completed_steps;
+          if (typeof data?.success_steps === "number") successSteps.value = data.success_steps;
+          if (typeof data?.failed_steps === "number") failedSteps.value = data.failed_steps;
           recomputePercentFromFinished();
           updateStatus(progressPct.value >= 100 ? "finished" : "running");
           return;
@@ -630,10 +661,29 @@ onUnmounted(() => {
         <span class="progress-label">{{ progressPct }}%</span>
       </div>
     </div>
-    <!-- todo
-    <div v-if="totalSteps > 0" class="step-calc-hint">
-      步骤统计：已完成 {{ finishedSteps }} / {{ totalSteps }}
-    </div> -->
+    <div v-if="totalSteps > 0" class="step-stats-row">
+      <div class="step-stat-item">
+        <span class="stat-label">总步数:</span>
+        <span class="stat-value">{{ totalSteps }}</span>
+        <el-tooltip content="单设备步数 × 在线设备数" placement="top">
+          <el-icon class="stat-help-icon"><InfoFilled /></el-icon>
+        </el-tooltip>
+      </div>
+      <div class="step-stat-item success">
+        <el-icon><CircleCheck /></el-icon>
+        <span class="stat-label">成功:</span>
+        <span class="stat-value">{{ successSteps }}</span>
+      </div>
+      <div class="step-stat-item failed">
+        <el-icon><CircleClose /></el-icon>
+        <span class="stat-label">失败:</span>
+        <span class="stat-value">{{ failedSteps }}</span>
+      </div>
+      <div class="step-stat-item">
+        <span class="stat-label">已完成:</span>
+        <span class="stat-value">{{ finishedSteps }} / {{ totalSteps }}</span>
+      </div>
+    </div>
   </div>
 </template>
 <style scoped>
@@ -731,6 +781,55 @@ onUnmounted(() => {
   font-weight: bold;
   margin-right: 10px;
   text-shadow: 0 1px 4px #7b8cff44;
+}
+
+.step-stats-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #ffffff;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.step-stat-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.step-stat-item.success {
+  color: #67c23a;
+}
+
+.step-stat-item.success .el-icon {
+  font-size: 16px;
+}
+
+.step-stat-item.failed {
+  color: #f56c6c;
+}
+
+.step-stat-item.failed .el-icon {
+  font-size: 16px;
+}
+
+.stat-label {
+  color: #606266;
+  font-weight: 500;
+}
+
+.stat-value {
+  color: #303133;
+  font-weight: 600;
+}
+
+.stat-help-icon {
+  font-size: 14px;
+  color: #909399;
+  cursor: help;
 }
 
 .runner {

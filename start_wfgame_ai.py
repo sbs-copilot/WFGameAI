@@ -17,7 +17,7 @@ conda activate py310_paddlex_gpu
 
 使用
  → 线上环境绑定 8000
-python start_wfgame_ai.py --config config.ini
+python start_wfgame_ai.py --config config.ini   
 
  → 开发环境绑定 9000
 python start_wfgame_ai.py --config config_dev.ini
@@ -31,6 +31,18 @@ import signal
 import webbrowser
 import platform
 import argparse
+
+# 修复 Windows 控制台编码问题
+if sys.platform == 'win32':
+    import locale
+    # 尝试设置控制台为 UTF-8
+    try:
+        if sys.stdout.encoding != 'utf-8':
+            import io
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 # 全局变量，存储进程句柄，用于程序退出时终止进程
 processes = []
@@ -61,7 +73,14 @@ def print_colored(text, color):
     if platform.system() == 'Windows':
         os.system('color')
 
-    print(f"{colors.get(color, '')}{text}{colors['reset']}")
+    # 修复 Windows 控制台 Unicode 编码问题
+    try:
+        print(f"{colors.get(color, '')}{text}{colors['reset']}")
+    except UnicodeEncodeError:
+        # 如果遇到编码错误，移除 emoji 后重试
+        import re
+        text_no_emoji = re.sub(r'[^\u0000-\uFFFF]', '', text)
+        print(f"{colors.get(color, '')}{text_no_emoji}{colors['reset']}")
 
 def prepare_devices():
     """
@@ -255,7 +274,7 @@ def start_usb_monitor(config_path: str = None):
     """
     print_colored("\n====== 启动USB设备监控 ======", 'yellow')
 
-    monitor_script = os.path.join(get_project_root(), "wfgame-ai-server", "scripts", "monitor_usb.py")
+    monitor_script = os.path.join(get_project_root(), "wfgame-ai-server", "apps","scripts", "monitor_usb.py")
 
     if not os.path.exists(monitor_script):
         print_colored(f"错误: USB监控脚本不存在: {monitor_script}", 'red')

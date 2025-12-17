@@ -201,7 +201,9 @@ export const ocrRepositoryApi = {
 };
 
 // OCR 任务相关接口
-const OCR_DOWNLOAD_DEFAULT_TIMEOUT = 60 * 1000;
+const OCR_DOWNLOAD_DEFAULT_TIMEOUT = 300 * 1000;
+// OCR任务处理超时时间（上传和Git任务）
+const OCR_TASK_DEFAULT_TIMEOUT = 300 * 1000;
 
 export const ocrTaskApi = {
   // deprecated
@@ -237,14 +239,16 @@ export const ocrTaskApi = {
     }),
   createGitTask: (data: CreateGitTaskParams) =>
     http.request<ApiResult>("post", baseUrlApi("/ocr/process/"), {
-      data: { ...data, action: "process_git" }
+      data: { ...data, action: "process_git" },
+      timeout: OCR_TASK_DEFAULT_TIMEOUT
     }),
   createUploadTask: (formData: FormData) =>
     http.request<ApiResult>("post", baseUrlApi("/ocr/upload/"), {
       data: formData,
       headers: {
         "Content-Type": undefined // 明确清除默认的application/json，让浏览器自动设置multipart/form-data
-      }
+      },
+      timeout: OCR_TASK_DEFAULT_TIMEOUT
     }),
   history: (params: OcrHistoryQuery) =>
     http.request<ApiResult>("post", baseUrlApi("/ocr/history/"), {
