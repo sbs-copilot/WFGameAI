@@ -120,7 +120,8 @@ const findLineNumberForStep = (
   let objectCounter = -1;
 
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim().includes(`"action":`)) {
+    // 对象开始的标记为： {
+    if (lines[i].trim().includes(`{`)) {
       objectCounter++;
       if (objectCounter === stepIndex) {
         objectStartIndex = i;
@@ -132,7 +133,19 @@ const findLineNumberForStep = (
   if (objectStartIndex === -1) return -1;
 
   if (!paramName) {
-    return objectStartIndex;
+    // 如果没有参数名，从对象起始行 ~ 第一个 } 行范围内尝试查找 "action:" 参数
+    // 如果找不到，则返回对象起始行
+    for (let i = objectStartIndex; i < lines.length; i++) {
+      const lineContent = lines[i].trim();
+      if (lineContent.includes(`"action"`)) {
+        return i;
+      }
+      if (lineContent.includes("}") && i > objectStartIndex) {
+        // 超出当前对象范围
+        break;
+      }
+    }
+    return objectStartIndex + 1; // 默认返回对象起始行的下一行
   }
 
   // 在对象内部查找参数

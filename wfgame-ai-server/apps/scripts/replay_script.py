@@ -2734,20 +2734,12 @@ def apply_defaults_to_steps(steps):
     exclude_keys = []
     is_defaults_step = False
     
-    # 检查第一个步骤是否是defaults定义
-    if first_step.get('step_type') == 'defaults':
+    # 检查第一个步骤是否是全局默认配置定义
+    if first_step.get('type') == 'global':
+        # 方式1: type="global" (推荐)
         is_defaults_step = True
-        exclude_keys = ['step_type', 'remark']
-    elif first_step.get('is_defaults') == True:
-        is_defaults_step = True
-        exclude_keys = ['is_defaults', 'remark']
-    elif first_step.get('action') == 'set_defaults':
-        is_defaults_step = True
-        exclude_keys = ['remark']
-        if 'default_action' in first_step:
-            first_step['action'] = first_step['default_action']
-            exclude_keys.append('default_action')
-    
+        exclude_keys = ['type', 'remark']
+        
     if is_defaults_step:
         # 提取defaults
         defaults = {k: v for k, v in first_step.items() if k not in exclude_keys}
@@ -2757,16 +2749,11 @@ def apply_defaults_to_steps(steps):
     
     # 应用defaults到每个步骤
     if defaults:
-        for idx, step in enumerate(steps):
-            # print_realtime(f"🔧 步骤{idx+1}合并前: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
+        for step in enumerate(steps):
             for key, value in defaults.items():
                 if key not in step:
                     step[key] = value
-                #     print_realtime(f"   ✅ 应用defaults: {key}={value}")
-                # else:
-                #     print_realtime(f"   ⏭️  跳过(已存在): {key}={step[key]}")
-            # print_realtime(f"🔧 步骤{idx+1}合并后: action={step.get('action')}, yolo_class={step.get('yolo_class')}, ocr_keywords={step.get('ocr_keywords')}")
-    
+   
     return steps
 
 

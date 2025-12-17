@@ -174,9 +174,9 @@ class FileUploadSerializer(serializers.Serializer):
 
     def validate_file(self, value):
         """验证上传文件"""
-        # 文件大小限制 (100MB)
-        if value.size > 100 * 1024 * 1024:
-            raise serializers.ValidationError("文件大小不能超过100MB")
+        # 文件大小限制 (2GB)
+        if value.size > 2048 * 1024 * 1024:
+            raise serializers.ValidationError("文件大小不能超过2GB")
 
         # 验证文件扩展名
         allowed_extensions = [

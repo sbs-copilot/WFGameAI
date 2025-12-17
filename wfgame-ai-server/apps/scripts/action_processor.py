@@ -7,6 +7,8 @@ Action处理器模块
 # 🔧 新增：禁用第三方库DEBUG日志
 import logging
 
+from rest_framework.decorators import action
+
 from utils.socketio_helper import SocketIOHttpApiClient
 from utils.socketIo_room_names import device_room
 
@@ -770,7 +772,7 @@ class ActionProcessor:
 
     def _handle_delay(self, step, step_idx, log_dir=None):
         """处理延时步骤"""
-        delay_seconds = step.get("params", {}).get("seconds", 1)
+        delay_seconds = step.get("seconds", 1)
         step_remark = step.get("remark", "")
 
         print(f"延时 {delay_seconds} 秒: {step_remark}")
@@ -1306,16 +1308,16 @@ class ActionProcessor:
     
     def _handle_yolo_then_ocr_detection(self, step, step_idx, log_dir):
         """处理YOLO+OCR组合检测模式"""
-        step_class = step.get("yolo_class")
+        yolo_class = step.get("yolo_class")
         ocr_keywords = step.get("ocr_keywords")
         step_remark = step.get("remark", "")
-        print(f"[YOLO+OCR模式] YOLO类别: {step_class}, OCR关键字: {ocr_keywords}")
+        print(f"[YOLO+OCR模式] YOLO类别: {yolo_class}, OCR关键字: {ocr_keywords}")
         
         try:
             screenshot = get_device_screenshot(self.device)
             if screenshot is None:
                 print(f"❌ 无法获取设备屏幕截图")
-                return self._create_failed_result(f"{step_class}+{ocr_keywords}", step_remark, "screenshot_failed")
+                return self._create_failed_result(f"{yolo_class}+{ocr_keywords}", step_remark, "screenshot_failed")
             
             frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
             
@@ -1328,7 +1330,7 @@ class ActionProcessor:
                 # YOLO+OCR组合模式
                 success, detection_result = self.detect_buttons(
                     frame,
-                    target_class=step_class,
+                    target_class=yolo_class,
                     conf_threshold=step_confidence,
                     use_ocr=True,
                     ocr_keywords=ocr_keywords,
@@ -1354,7 +1356,7 @@ class ActionProcessor:
                     
                     call_args = {
                         "detection_mode": "yolo_then_ocr",
-                        "target_class": step_class,
+                        "target_class": yolo_class,
                         "position": [int(x), int(y)]
                     }
                     if ocr_result:
@@ -1372,7 +1374,7 @@ class ActionProcessor:
                             "start_time": timestamp,
                             "ret": [int(x), int(y)],
                             "end_time": timestamp,
-                            "desc": step_remark or f"YOLO+OCR检测点击({step_class}+{ocr_keywords})",
+                            "desc": step_remark or f"YOLO+OCR检测点击({yolo_class}+{ocr_keywords})",
                             "executed": True
                         }
                     }
@@ -1382,16 +1384,16 @@ class ActionProcessor:
                     
                     return ActionResult(
                         success=True,
-                        message=f"YOLO+OCR检测点击成功: {step_class}",
-                        details={"operation": "ai_detection_click", "target_class": step_class, "position": [int(x), int(y)]},
+                        message=f"YOLO+OCR检测点击成功: {yolo_class}",
+                        details={"operation": "ai_detection_click", "target_class": yolo_class, "position": [int(x), int(y)]},
                         executed=True
                     )
                 else:
                     print(f"❌ YOLO+OCR未找到匹配目标")
                     return ActionResult(
                         success=False,
-                        message=f"YOLO+OCR未找到匹配目标: {step_class}+{ocr_keywords}",
-                        details={"operation": "ai_detection_click", "target_class": step_class, "ocr_keywords": ocr_keywords},
+                        message=f"YOLO+OCR未找到匹配目标: {yolo_class}+{ocr_keywords}",
+                        details={"operation": "ai_detection_click", "target_class": yolo_class, "ocr_keywords": ocr_keywords},
                         executed=False
                     )
             else:
@@ -1681,10 +1683,10 @@ class ActionProcessor:
 
     def _handle_app_stop(self, step, step_idx):
         """处理应用停止步骤"""
-        params = step.get("params", {})
+        action = step.get("action", "")
         step_remark = step.get("remark", "")
-        app_name = params.get("app_name", "")
-        package_name = params.get("package_name", "")
+        app_name = step.get("app_name", "")
+        package_name = step.get("package_name", "")
 
         print(f"停止应用 - {step_remark}")
 
@@ -1766,7 +1768,7 @@ class ActionProcessor:
 
     def _handle_log(self, step, step_idx):
         """处理日志步骤"""
-        log_message = step.get("params", {}).get("message", step.get("remark", ""))
+        log_message = step.get("remark", "")
         print(f"日志: {log_message}")
 
         # 记录日志条目
@@ -3502,9 +3504,6 @@ class ActionProcessor:
             import json
             script_json = json.loads(script_content)
 
-            # 兼容两种脚本格式
-            # 格式1: 数组格式 [{step1}, {step2}] - 前端脚本编辑器使用
-            # 格式2: 对象格式 {"defaults": {...}, "steps": [...]} - 精简版本使用
             if isinstance(script_json, list):
                 # 数组格式
                 print("📋 检测到数组格式脚本")
@@ -3512,33 +3511,20 @@ class ActionProcessor:
                 defaults = {}
                 meta = {}
                 
-                # 检查第一个步骤是否是defaults定义
+                # 检查第一个步骤是否是global定义
                 if len(steps) > 0:
                     first_step = steps[0]
                     # 支持多种标记方式
-                    is_defaults_step = False
+                    is_global_step = False
+                    # 默认排除的字段。不作为默认参数传递给后续步骤
                     exclude_keys = []
                     
-                    if first_step.get('step_type') == 'defaults':
-                        # 方式1: step_type="defaults" (推荐)
-                        is_defaults_step = True
-                        exclude_keys = ['step_type', 'remark']
-                    elif first_step.get('is_defaults') == True:
-                        # 方式2: is_defaults=true
-                        is_defaults_step = True
-                        exclude_keys = ['is_defaults', 'remark']
-                    elif first_step.get('action') == 'set_defaults':
-                        # 方式3: action="set_defaults"
-                        # 这种方式下,action字段本身是标记,真正的action应该在default_action字段
-                        is_defaults_step = True
-                        exclude_keys = ['action', 'remark']
-                        # 如果有default_action字段,将其重命名为action
-                        if 'default_action' in first_step:
-                            first_step['action'] = first_step['default_action']
-                            exclude_keys.append('default_action')
+                    if first_step.get('type') == 'global':
+                        is_global_step = True
+                        exclude_keys = ['type', 'remark']
                     
-                    if is_defaults_step:
-                        # 第一个步骤是defaults定义,提取所有参数(排除标记字段)
+                    if is_global_step:
+                        # 第一个步骤是 global 定义,提取所有参数(排除标记字段)
                         defaults = {k: v for k, v in first_step.items() 
                                    if k not in exclude_keys}
                         steps = steps[1:]  # 移除defaults步骤
@@ -3567,66 +3553,15 @@ class ActionProcessor:
                     print(f"🔧 步骤 {step_idx + 1} 合并后: {step}")
                 # 兼容两种脚本格式：新格式使用action字段，旧格式使用class字段
                 action = step.get('action')
-                step_class = step.get('class', '')
                 target_selector = step.get('target_selector', {})
                 text = step.get('text', '')
-                params = step.get('params', {})
                 remark = step.get('remark', '')
 
-                # 处理ui_type字段，将其转换为target_selector格式
-                ui_type = step.get('ui_type')
-                if ui_type and not target_selector:
-                    target_selector = {'type': ui_type}
-                elif ui_type and target_selector and 'type' not in target_selector:
-                    target_selector['type'] = ui_type
-
-                # 如果没有action字段，根据class字段推导action
-                if not action:
-                    if step_class in ['app_start', 'start_app']:
-                        action = 'app_start'
-                    elif step_class in ['app_stop', 'stop_app']:
-                        action = 'app_stop'
-                    elif step_class in ['device_preparation']:
-                        action = 'device_preparation'
-                    elif step_class in ['delay', 'wait', 'sleep']:
-                        action = 'delay'
-                    elif step_class:  # 如果有class但没有action，默认为click
-                        action = 'click'
-                    else:
-                        action = 'click'  # 完全默认为点击
-                        print(f"🔧 执行步骤 {step_idx + 1}: action={action}, remark={remark}")                # 读取弹窗处理参数（仅当JSON脚本中明确设置时才执行）
-                # 优先级：step参数 > meta参数，如果都没有设置则不执行弹窗处理
-                step_auto_handle = step.get('auto_handle_dialog')
-                meta_auto_handle = meta.get('auto_handle_dialog')
-
-                # 只有当step或meta中明确设置了auto_handle_dialog参数时才处理弹窗
-                if step_auto_handle is not None:
-                    auto_handle = step_auto_handle
-                elif meta_auto_handle is not None:
-                    auto_handle = meta_auto_handle
-                else:
-                    auto_handle = False  # 如果都没设置，默认不处理弹窗
-
-                # 步骤前处理弹窗（仅当明确启用时）
-                if auto_handle:
-                    # 兼容参数：优先 dialog_max_duration，回退到 dialog_max_wait
-                    dialog_max_duration = step.get('dialog_max_duration', meta.get('dialog_max_duration', None))
-                    if dialog_max_duration is None:
-                        dialog_max_duration = step.get('dialog_max_wait', meta.get('dialog_max_wait', 5.0))
-                    retry_interval = step.get('dialog_retry_interval', meta.get('dialog_retry_interval', 0.5))
-                    duration = step.get('dialog_duration', meta.get('dialog_duration', 1.0))
-
-                    print(f"🛡️ 检测并处理系统弹窗（最大等待：{dialog_max_duration}秒）")
-                    self.handle_system_dialogs(
-                        max_duration=dialog_max_duration,
-                        retry_interval=retry_interval,
-                        duration=duration
-                    )
-
+                print(f"🔧 执行步骤 {step_idx + 1}: action={action}, remark={remark}")
                 try:
                     if action == 'delay':
                         # 延迟操作
-                        delay_time = params.get('seconds', 1.0)
+                        delay_time = step.get('seconds', 1.0)
                         print(f"⏰ 延迟 {delay_time} 秒")
                         time.sleep(float(delay_time))
                     elif action == 'input':
@@ -3662,7 +3597,7 @@ class ActionProcessor:
 
                     elif action == 'checkbox':
                         # checkbox操作 - 支持参数化
-                        print(f"☑️ 执行checkbox勾选操作")
+                        print(f"☑️ 执行checkbox勾选操作，已废弃。改为使用yolo_class识别")
                         if DeviceScriptReplayer is None:
                             print("❌ DeviceScriptReplayer不可用，无法执行checkbox操作")
                             continue
@@ -3695,6 +3630,14 @@ class ActionProcessor:
                         success = self._route_to_action_processor(step, step_idx, 'ai_detection_click')
                         if not success:
                             print(f"❌ ai_detection_click 操作失败")
+                            continue
+                    
+                    # 新增支持: OCR检测点击操作 (ai_detection_click的别名)
+                    elif action == 'ocr_click':
+                        print(f"🔍 执行OCR检测点击操作:")
+                        success = self._route_to_action_processor(step, step_idx, 'ai_detection_click')
+                        if not success:
+                            print(f"❌ ocr_click 操作失败")
                             continue
 
                     # 新增支持: 滑动操作 (Priority模式)
@@ -3759,8 +3702,11 @@ class ActionProcessor:
                         print(f"⚠️ process_script不支持的操作: {action}，跳过")
                         continue
 
-                    # 操作间延迟
-                    time.sleep(0.5)
+                    # 步骤执行后延迟（支持从全局defaults继承）
+                    sleep_time = step.get('sleep', 0.5)  # 默认0.5秒
+                    if sleep_time > 0:
+                        print(f"⏳ 步骤执行后等待 {sleep_time} 秒...")
+                        time.sleep(sleep_time)
                 except Exception as e:
                     print(f"❌ 步骤 {step_idx + 1} 执行异常: {e}")
                     import traceback
